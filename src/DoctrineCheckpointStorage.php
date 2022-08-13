@@ -36,6 +36,7 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
                 'subscriberId' => $this->subscriberId
             ]);
         } catch (DriverException $exception) {
+            $this->connection->rollBack();
             // Error code "1205" = ER_LOCK_WAIT_TIMEOUT in MySQL (https://dev.mysql.com/doc/refman/8.0/en/server-error-reference.html#error_er_lock_wait_timeout)
             // SQL State "55P03" = lock_not_available in PostgreSQL (https://www.postgresql.org/docs/9.4/errcodes-appendix.html)
             if ($exception->getErrorCode() === 1205 || $exception->getSQLState() === '55P03') {
@@ -43,9 +44,8 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
             }
             throw new \RuntimeException($exception->getMessage(), 1544207633, $exception);
         } catch (DBALException $exception) {
-            throw new \RuntimeException($exception->getMessage(), 1544207778, $exception);
-        } finally {
             $this->connection->rollBack();
+            throw new \RuntimeException($exception->getMessage(), 1544207778, $exception);
         }
         if (!is_numeric($highestAppliedSequenceNumber)) {
             throw new CheckpointException(sprintf('Failed to fetch highest applied sequence number for subscriber "%s". Please run %s::setup()', $this->subscriberId, $this::class), 1652279139);
@@ -55,10 +55,9 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
 
     public function updateAndReleaseLock(SequenceNumber $sequenceNumber): void
     {
-        // TODO check for active transaction?
-//        if (!$this->connection->isTransactionActive()) {
-//            throw new CheckpointException(sprintf('Failed to update and commit checkpoint for subscriber "%s" because no transaction is active', $this->subscriberId), 1652279314);
-//        }
+        if (!$this->connection->isTransactionActive()) {
+            throw new CheckpointException(sprintf('Failed to update and commit checkpoint for subscriber "%s" because no transaction is active', $this->subscriberId), 1652279314);
+        }
         // Fails if no matching entry exists; which is fine because initializeHighestAppliedSequenceNumber() must be called beforehand.
         try {
             $this->connection->update(
@@ -66,6 +65,7 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
                 ['appliedsequencenumber' => $sequenceNumber->value],
                 ['subscriberid' => $this->subscriberId]
             );
+            $this->connection->commit();
         } catch (DBALException $exception) {
             throw new CheckpointException(sprintf('Failed to update and commit highest applied sequence number for subscriber "%s". Please run %s::setup()', $this->subscriberId, $this::class), 1652279375, $exception);
         }
