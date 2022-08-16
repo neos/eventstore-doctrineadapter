@@ -58,7 +58,7 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
         }
         if (!is_numeric($highestAppliedSequenceNumber)) {
             $this->connection->rollBack();
-            throw new CheckpointException(sprintf('Failed to fetch highest applied sequence number for subscriber "%s". Please run %s::setup()', $this->subscriberId, $this::class), 1652279139);
+            throw new \RuntimeException(sprintf('Failed to fetch highest applied sequence number for subscriber "%s". Please run %s::setup()', $this->subscriberId, $this::class), 1652279139);
         }
         $this->lockedSequenceNumber = SequenceNumber::fromInteger((int)$highestAppliedSequenceNumber);
         return $this->lockedSequenceNumber;
