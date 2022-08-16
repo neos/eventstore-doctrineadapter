@@ -42,7 +42,7 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
     public function acquireLock(): SequenceNumber
     {
         if ($this->connection->isTransactionActive()) {
-            throw new CheckpointException(sprintf('Failed to acquire checkpoint lock for subscriber "%s" because a transaction is active already', $this->subscriberId), 1652268416);
+            throw new \RuntimeException(sprintf('Failed to acquire checkpoint lock for subscriber "%s" because a transaction is active already', $this->subscriberId), 1652268416);
         }
         $this->connection->beginTransaction();
         try {
