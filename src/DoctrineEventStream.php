@@ -24,7 +24,8 @@ final class DoctrineEventStream implements EventStreamInterface
         private readonly ?SequenceNumber $maximumSequenceNumber,
         private readonly ?int $limit,
         private readonly bool $backwards,
-    ) {}
+    ) {
+    }
 
     public static function create(QueryBuilder $queryBuilder): self
     {

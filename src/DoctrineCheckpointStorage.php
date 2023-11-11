@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace Neos\EventStore\DoctrineAdapter;
 
 use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Exception\DriverException as DBALDriverException;
 use Doctrine\DBAL\Exception as DBALException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
@@ -30,9 +31,6 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
         private readonly string $subscriberId,
     ) {
         $platform = $this->connection->getDatabasePlatform();
-        if ($platform === null) {
-            throw new \InvalidArgumentException(sprintf('Failed to determine database platform for database "%s"', $this->connection->getDatabase()), 1660555815);
-        }
         if (!($platform instanceof MySqlPlatform || $platform instanceof PostgreSqlPlatform)) {
             throw new \InvalidArgumentException(sprintf('The %s only supports the platforms %s and %s currently. Given: %s', $this::class, MySqlPlatform::class, PostgreSqlPlatform::class, get_debug_type($platform)), 1660556004);
         }
@@ -49,11 +47,11 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
             $highestAppliedSequenceNumber = $this->connection->fetchOne('SELECT appliedsequencenumber FROM ' . $this->connection->quoteIdentifier($this->tableName) . ' WHERE subscriberid = :subscriberId ' . $this->platform->getForUpdateSQL() . ' NOWAIT', [
                 'subscriberId' => $this->subscriberId
             ]);
-        } catch (LockWaitTimeoutException $exception) {
-            $this->connection->rollBack();
-            throw new CheckpointException(sprintf('Failed to acquire checkpoint lock for subscriber "%s" because it is acquired already', $this->subscriberId), 1652279016);
         } catch (DBALException $exception) {
             $this->connection->rollBack();
+            if ($exception instanceof LockWaitTimeoutException || ($exception instanceof DBALDriverException && ($exception->getErrorCode() === 3572 || $exception->getErrorCode() === 7))) {
+                throw new CheckpointException(sprintf('Failed to acquire checkpoint lock for subscriber "%s" because it is acquired already', $this->subscriberId), 1652279016);
+            }
             throw new \RuntimeException($exception->getMessage(), 1544207778, $exception);
         }
         if (!is_numeric($highestAppliedSequenceNumber)) {

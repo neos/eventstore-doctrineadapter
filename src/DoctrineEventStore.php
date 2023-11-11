@@ -65,7 +65,6 @@ final class DoctrineEventStore implements EventStoreInterface, ProvidesSetupInte
                 VirtualStreamType::CATEGORY => $queryBuilder->andWhere('stream LIKE :streamNamePrefix')->setParameter('streamNamePrefix', $streamName->value . '%'),
                 VirtualStreamType::CORRELATION_ID => $queryBuilder->andWhere('correlationId LIKE :correlationId')->setParameter('correlationId', $streamName->value),
             },
-            default => $queryBuilder,
         };
         if ($filter !== null && $filter->eventTypes !== null) {
             $queryBuilder->andWhere('type IN (:eventTypes)')->setParameter('eventTypes', $filter->eventTypes->toStringArray(), Connection::PARAM_STR_ARRAY);

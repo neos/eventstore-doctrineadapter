@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-namespace Neos\EventStore\DoctrineAdapter\Tests;
+namespace Neos\EventStore\DoctrineAdapter\Tests\Unit;
 
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception as DBALException;
@@ -10,9 +10,11 @@ use Doctrine\DBAL\Platforms\SqlitePlatform;
 use Neos\EventStore\DoctrineAdapter\DoctrineCheckpointStorage;
 use Neos\EventStore\Exception\CheckpointException;
 use Neos\EventStore\Model\Event\SequenceNumber;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(DoctrineCheckpointStorage::class)]
 final class DoctrineCheckpointStorageTest extends TestCase
 {
     private Connection|MockObject $mockConnection;
