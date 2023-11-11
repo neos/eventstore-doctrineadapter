@@ -102,7 +102,8 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
         if (!$schemaManager instanceof AbstractSchemaManager) {
             throw new \RuntimeException('Failed to retrieve Schema Manager', 1652269057);
         }
-        $schema = new Schema();
+        $schemaConfiguration = $schemaManager->createSchemaConfig();
+        $schema = new Schema([], [], $schemaConfiguration);
         $table = $schema->createTable($this->tableName);
         $table->addColumn('subscriberid', Types::STRING, ['length' => 255]);
         $table->addColumn('appliedsequencenumber', Types::INTEGER);
