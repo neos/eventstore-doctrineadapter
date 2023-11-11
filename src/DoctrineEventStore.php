@@ -159,11 +159,7 @@ final class DoctrineEventStore implements EventStoreInterface, ProvidesSetupInte
      */
     private function createEventStoreSchema(): Schema
     {
-        $schemaConfiguration = new SchemaConfig();
-        $connectionParameters = $this->connection->getParams();
-        if (isset($connectionParameters['defaultTableOptions'])) {
-            $schemaConfiguration->setDefaultTableOptions($connectionParameters['defaultTableOptions']);
-        }
+        $schemaConfiguration = $this->connection->getSchemaManager()->createSchemaConfig();
         $schema = new Schema([], [], $schemaConfiguration);
         $table = $schema->createTable($this->eventTableName);
 
