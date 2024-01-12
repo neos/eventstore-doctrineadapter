@@ -10,6 +10,7 @@ use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\DBAL\Platforms\MySqlPlatform;
 use Doctrine\DBAL\Platforms\PostgreSqlPlatform;
 use Doctrine\DBAL\Schema\AbstractSchemaManager;
+use Doctrine\DBAL\Schema\Column;
 use Doctrine\DBAL\Schema\Comparator;
 use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Types\Types;
@@ -96,18 +97,30 @@ final class DoctrineCheckpointStorage implements CheckpointStorageInterface, Pro
 
     public function setup(): SetupResult
     {
-        $schemaManager = $this->connection->getSchemaManager();
+        $schemaManager = $this->connection->createSchemaManager();
         if (!$schemaManager instanceof AbstractSchemaManager) {
             throw new \RuntimeException('Failed to retrieve Schema Manager', 1652269057);
         }
-        $schema = new Schema();
-        $table = $schema->createTable($this->tableName);
+
+        $toSchema = new Schema();
+        $table = $toSchema->createTable($this->tableName);
         $table->addColumn('subscriberid', Types::STRING, ['length' => 255]);
         $table->addColumn('appliedsequencenumber', Types::INTEGER);
         $table->setPrimaryKey(['subscriberid']);
 
-        $schemaDiff = (new Comparator())->compare($schemaManager->createSchema(), $schema);
-        foreach ($schemaDiff->toSaveSql($this->platform) as $statement) {
+        $tables = [];
+        try {
+            $dbTable = $schemaManager->introspectTable($this->tableName);
+            $tables[] = $dbTable;
+        } catch (\Throwable) {
+            // If the table is not found in the database, an error is thrown
+            // In this case, we compare an empty database schema with the schema to be created
+        }
+
+        $fromSchema = new Schema($tables);
+        $schemaDiff = (new Comparator())->compareSchemas($fromSchema, $toSchema);
+
+        foreach ($this->platform->getAlterSchemaSQL($schemaDiff) as $statement) {
             $this->connection->executeStatement($statement);
         }
         try {

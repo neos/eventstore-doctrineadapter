@@ -132,12 +132,23 @@ final class DoctrineEventStore implements EventStoreInterface, ProvidesSetupInte
 
     public function setup(): SetupResult
     {
-        $schemaManager = $this->connection->getSchemaManager();
+        $schemaManager = $this->connection->createSchemaManager();
         assert($schemaManager !== null);
-        $fromSchema = $schemaManager->createSchema();
-        $schemaDiff = (new Comparator())->compare($fromSchema, $this->createEventStoreSchema());
 
-        $statements = $schemaDiff->toSaveSql($this->connection->getDatabasePlatform());
+        $tables = [];
+        try {
+            $dbTable = $schemaManager->introspectTable($this->eventTableName);
+            $tables[] = $dbTable;
+        } catch (\Throwable) {
+            // If the table is not found in the database, an error is thrown
+            // In this case, we compare an empty database schema with the schema to be created
+        }
+
+        $fromSchema = new Schema($tables);
+        $schemaDiff = (new Comparator())->compareSchemas($fromSchema, $this->createEventStoreSchema());
+
+        $platform = $this->connection->getDatabasePlatform();
+        $statements = $platform->getAlterSchemaSQL($schemaDiff);
         if ($statements === []) {
             return SetupResult::success('Table schema is up to date, no migration required');
         }
