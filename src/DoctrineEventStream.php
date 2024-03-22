@@ -5,6 +5,8 @@ namespace Neos\EventStore\DoctrineAdapter;
 use Doctrine\DBAL\ForwardCompatibility\Result;
 use Doctrine\DBAL\Query\QueryBuilder;
 use Neos\EventStore\Model\Event;
+use Neos\EventStore\Model\Event\CausationId;
+use Neos\EventStore\Model\Event\CorrelationId;
 use Neos\EventStore\Model\Event\EventData;
 use Neos\EventStore\Model\Event\EventId;
 use Neos\EventStore\Model\Event\EventMetadata;
@@ -95,6 +97,8 @@ final class DoctrineEventStream implements EventStreamInterface
                     EventType::fromString($row['type']),
                     EventData::fromString($row['payload']),
                     isset($row['metadata']) ? EventMetadata::fromJson($row['metadata']) : null,
+                    isset($row['causationid']) ? CausationId::fromString($row['causationid']) : null,
+                    isset($row['correlationid']) ? CorrelationId::fromString($row['correlationid']) : null,
                 ),
                 StreamName::fromString($row['stream']),
                 Version::fromInteger((int)$row['version']),
