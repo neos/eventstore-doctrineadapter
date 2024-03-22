@@ -5,7 +5,7 @@ namespace Neos\EventStore\DoctrineAdapter\Tests\Integration;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\DBAL\Exception as DbalException;
-use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
+use Doctrine\DBAL\Platforms\PostgreSQLPlatform; // @phpstan-ignore-line
 use Doctrine\DBAL\Platforms\SqlitePlatform;
 use Neos\EventStore\DoctrineAdapter\DoctrineEventStore;
 use Neos\EventStore\EventStoreInterface;
@@ -32,7 +32,7 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
         if ($connection->getDatabasePlatform() instanceof SqlitePlatform) {
             $connection->executeStatement('DELETE FROM ' . self::eventTableName());
             $connection->executeStatement('UPDATE SQLITE_SEQUENCE SET SEQ=0 WHERE NAME="' . self::eventTableName() . '"');
-        } elseif ($connection->getDatabasePlatform() instanceof PostgreSQLPlatform) {
+        } elseif ($connection->getDatabasePlatform() instanceof PostgreSQLPlatform) { // @phpstan-ignore-line
             $connection->executeStatement('TRUNCATE TABLE ' . self::eventTableName() . ' RESTART IDENTITY');
         } else {
             $connection->executeStatement('TRUNCATE TABLE ' . self::eventTableName());
