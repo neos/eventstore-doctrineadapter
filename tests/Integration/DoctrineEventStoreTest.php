@@ -7,6 +7,7 @@ use Doctrine\DBAL\DriverManager;
 use Doctrine\DBAL\Exception as DbalException;
 use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Platforms\SqlitePlatform;
+use Doctrine\DBAL\Tools\DsnParser;
 use Neos\EventStore\DoctrineAdapter\DoctrineEventStore;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Model\EventStore\StatusType;
@@ -26,7 +27,8 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
     protected static function resetEventStore(): void
     {
         $connection = self::connection();
-        if (!$connection->getSchemaManager()->tablesExist([self::eventTableName()])) {
+        $schemaManager = $connection->createSchemaManager();
+        if (!$schemaManager->tablesExist([self::eventTableName()])) {
             return;
         }
         if ($connection->getDatabasePlatform() instanceof SqlitePlatform) {
@@ -44,9 +46,9 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
         if (self::$connection === null) {
             $dsn = getenv('DB_DSN');
             if (!is_string($dsn)) {
-                $dsn = 'sqlite:///events_test.sqlite';
+                $dsn = 'pdo-sqlite:///events_test.sqlite';
             }
-            self::$connection = DriverManager::getConnection(['url' => $dsn]);
+            self::$connection = self::getConnectionFromDsn($dsn);
         }
         return self::$connection;
     }
@@ -56,9 +58,15 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
         return 'events_test';
     }
 
+    private static function getConnectionFromDsn(string $dsn): Connection
+    {
+        $dsnParser = new DsnParser();
+        return DriverManager::getConnection($dsnParser->parse($dsn));
+    }
+
     public function test_setup_throws_exception_if_database_connection_fails(): void
     {
-        $connection = DriverManager::getConnection(['url' => 'mysql://invalid-connection']);
+        $connection = self::getConnectionFromDsn('pdo-mysql://invalid-connection');
         $eventStore = new DoctrineEventStore($connection, self::eventTableName());
 
         $this->expectException(DbalException::class);
@@ -67,14 +75,14 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
 
     public function test_status_returns_error_status_if_database_connection_fails(): void
     {
-        $connection = DriverManager::getConnection(['url' => 'mysql://invalid-connection']);
+        $connection = self::getConnectionFromDsn('pdo-mysql://invalid-connection');
         $eventStore = new DoctrineEventStore($connection, self::eventTableName());
         self::assertSame($eventStore->status()->type, StatusType::ERROR);
     }
 
     public function test_status_returns_setup_required_status_if_event_table_is_missing(): void
     {
-        $connection = DriverManager::getConnection(['url' => 'sqlite:///:memory:']);
+        $connection = self::getConnectionFromDsn('pdo-sqlite:///:memory:');
         $eventStore = new DoctrineEventStore($connection, self::eventTableName());
         self::assertSame($eventStore->status()->type, StatusType::SETUP_REQUIRED);
     }
