@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace Neos\EventStore\DoctrineAdapter;
 
 use DateTimeImmutable;
+use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Driver\Exception as DriverException;
 use Doctrine\DBAL\Exception as DbalException;
@@ -14,7 +15,6 @@ use Doctrine\DBAL\Platforms\SqlitePlatform;
 use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Schema\AbstractSchemaManager;
 use Doctrine\DBAL\Schema\Column;
-use Doctrine\DBAL\Schema\Comparator;
 use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Types\Type;
@@ -75,7 +75,7 @@ final class DoctrineEventStore implements EventStoreInterface
             },
         };
         if ($filter !== null && $filter->eventTypes !== null) {
-            $queryBuilder->andWhere('type IN (:eventTypes)')->setParameter('eventTypes', $filter->eventTypes->toStringArray(), Connection::PARAM_STR_ARRAY);
+            $queryBuilder->andWhere('type IN (:eventTypes)')->setParameter('eventTypes', $filter->eventTypes->toStringArray(), ArrayParameterType::STRING);
         }
         return BatchEventStream::create(DoctrineEventStream::create($queryBuilder), 100);
     }
@@ -169,12 +169,12 @@ final class DoctrineEventStore implements EventStoreInterface
         assert($schemaManager !== null);
         $platform = $this->connection->getDatabasePlatform();
         assert($platform !== null);
-        if (!$schemaManager->tablesExist($this->eventTableName)) {
+        if (!$schemaManager->tablesExist([$this->eventTableName])) {
             return $platform->getCreateTableSQL($this->createEventStoreSchema($schemaManager)->getTable($this->eventTableName));
         }
         $tableSchema = $schemaManager->introspectTable($this->eventTableName);
         $fromSchema = new Schema([$tableSchema], [], $schemaManager->createSchemaConfig());
-        $schemaDiff = (new Comparator())->compareSchemas($fromSchema, $this->createEventStoreSchema($schemaManager));
+        $schemaDiff = $schemaManager->createComparator()->compareSchemas($fromSchema, $this->createEventStoreSchema($schemaManager));
         return $platform->getAlterSchemaSQL($schemaDiff);
     }
 
@@ -259,7 +259,7 @@ final class DoctrineEventStore implements EventStoreInterface
             ->from($this->eventTableName)
             ->where('stream = :streamName')
             ->setParameter('streamName', $streamName->value)
-            ->execute();
+            ->executeQuery();
         if (!$result instanceof Result) {
             throw new \RuntimeException(sprintf('Failed to determine stream version of stream "%s"', $streamName->value), 1651153859);
         }

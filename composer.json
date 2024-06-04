@@ -1,54 +1,54 @@
 {
-    "name": "neos/eventstore-doctrineadapter",
-    "description": "Doctrine DBAL based implementation for the neos/eventstore",
-    "type": "library",
-    "license": "MIT",
-    "funding": [
-        {
-            "type": "other",
-            "url": "https://www.neos.io/community/participate/supporting-neos.html"
-        }
-    ],
-    "require": {
-        "php": "^8.1",
-        "neos/eventstore": "^1",
-        "doctrine/dbal": "^3",
-        "webmozart/assert": "^1.10",
-        "psr/clock": "^1"
-    },
-    "require-dev": {
-        "roave/security-advisories": "dev-latest",
-        "phpstan/phpstan": "^1.10",
-        "squizlabs/php_codesniffer": "^4.0.x-dev",
-        "phpunit/phpunit": "^10",
-        "brianium/paratest": "^7.2"
-    },
-    "autoload": {
-        "psr-4": {
-            "Neos\\EventStore\\DoctrineAdapter\\": "src/"
-        }
-    },
-    "autoload-dev": {
-        "psr-4": {
-            "Neos\\EventStore\\DoctrineAdapter\\Tests\\": "tests/",
-            "Neos\\EventStore\\Tests\\": "vendor/neos/eventstore/tests/"
-        }
-    },
-    "scripts": {
-        "test:phpstan": "phpstan",
-        "test:cs": "phpcs --colors src",
-        "test:cs:fix": "phpcbf --colors src",
-        "test:integration": "phpunit tests/Integration --exclude-group=parallel",
-        "test:consistency": [
-            "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreTest::consistency_prepare",
-            "paratest tests/Integration --group=parallel --functional --processes 10",
-            "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreTest::consistency_validateEvents"
-        ],
-        "test": [
-            "@test:phpstan",
-            "@test:cs",
-            "@test:integration",
-            "@test:consistency"
-        ]
+  "name": "neos/eventstore-doctrineadapter",
+  "description": "Doctrine DBAL based implementation for the neos/eventstore",
+  "type": "library",
+  "license": "MIT",
+  "funding": [
+    {
+      "type": "other",
+      "url": "https://www.neos.io/community/participate/supporting-neos.html"
     }
+  ],
+  "require": {
+    "php": "^8.1",
+    "neos/eventstore": "^1",
+    "doctrine/dbal": "^3.8",
+    "webmozart/assert": "^1.10",
+    "psr/clock": "^1"
+  },
+  "require-dev": {
+    "roave/security-advisories": "dev-latest",
+    "phpstan/phpstan": "^1.10",
+    "squizlabs/php_codesniffer": "^4.0.x-dev",
+    "phpunit/phpunit": "^10",
+    "brianium/paratest": "^7.2"
+  },
+  "autoload": {
+    "psr-4": {
+      "Neos\\EventStore\\DoctrineAdapter\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Neos\\EventStore\\DoctrineAdapter\\Tests\\": "tests/",
+      "Neos\\EventStore\\Tests\\": "vendor/neos/eventstore/tests/"
+    }
+  },
+  "scripts": {
+    "test:phpstan": "phpstan",
+    "test:cs": "phpcs --colors src",
+    "test:cs:fix": "phpcbf --colors src",
+    "test:integration": "phpunit tests/Integration --exclude-group=parallel",
+    "test:consistency": [
+      "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreTest::consistency_prepare",
+      "paratest tests/Integration --group=parallel --functional --processes 10",
+      "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreTest::consistency_validateEvents"
+    ],
+    "test": [
+      "@test:phpstan",
+      "@test:cs",
+      "@test:integration",
+      "@test:consistency"
+    ]
+  }
 }
