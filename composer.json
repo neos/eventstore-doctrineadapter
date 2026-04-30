@@ -1,6 +1,6 @@
 {
     "name": "neos/eventstore-doctrineadapter",
-    "description": "Doctrine DBAL based implementation for the neos/eventstore",
+    "description": "Doctrine DBAL based implementation for the neos/eventstore - trigger ci",
     "type": "library",
     "license": "MIT",
     "funding": [
