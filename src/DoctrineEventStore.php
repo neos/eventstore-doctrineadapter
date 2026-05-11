@@ -297,7 +297,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 'metadata' => $event->metadata?->toJson(),
                 'causationid' => $event->causationId?->value,
                 'correlationid' => $event->correlationId?->value,
-                'recordedat' => $this->clock->now(),
+                'recordedat' => $this->clock->now()->setTimezone(new \DateTimeZone('UTC')),
             ],
             [
                 'version' => Types::BIGINT,
