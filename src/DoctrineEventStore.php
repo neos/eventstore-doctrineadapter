@@ -23,6 +23,8 @@ use Doctrine\DBAL\Types\Types;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Exception\ConcurrencyException;
 use Neos\EventStore\Helper\BatchEventStream;
+use Neos\EventStore\Model\Commit;
+use Neos\EventStore\Model\CommitList;
 use Neos\EventStore\Model\Event;
 use Neos\EventStore\Model\Event\CausationId;
 use Neos\EventStore\Model\Event\CorrelationId;
@@ -45,6 +47,8 @@ use Psr\Clock\ClockInterface;
 
 final class DoctrineEventStore implements EventStoreInterface, WithResetInterface
 {
+    private ?CommitResult $lastCommitResult = null;
+
     public function __construct(
         private readonly Connection $connection,
         private readonly string $eventTableName,
@@ -79,6 +83,17 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         if ($events instanceof Event) {
             $events = Events::fromArray([$events]);
         }
+        $this->commitAll(CommitList::create(new Commit(
+            streamName: $streamName,
+            events: $events,
+            expectedVersion: $expectedVersion,
+        )));
+        // TODO dont use mutable state, either remove as unused or let commitAll() return big CommitResults
+        return $this->lastCommitResult;
+    }
+
+    public function commitAll(CommitList $commitList): void
+    {
         # Exponential backoff: initial interval = 5ms and 8 retry attempts = max 1275ms (= 1,275 seconds)
         # @see http://backoffcalculator.com/?attempts=8&rate=2&interval=5
         $retryWaitInterval = 0.005;
@@ -91,21 +106,24 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             }
             $this->connection->beginTransaction();
             try {
-                $maybeVersion = $this->getStreamVersion($streamName);
-                $expectedVersion->verifyVersion($maybeVersion);
-                $version = $maybeVersion->isNothing() ? Version::first() : $maybeVersion->unwrap()->next();
-                $lastCommittedVersion = $version;
-                foreach ($events as $event) {
-                    $this->commitEvent($streamName, $event, $version);
+                foreach ($commitList as $commit) {
+                    $maybeVersion = $this->getStreamVersion($commit->streamName);
+                    $commit->expectedVersion->verifyVersion($maybeVersion);
+                    $version = $maybeVersion->isNothing() ? Version::first() : $maybeVersion->unwrap()->next();
                     $lastCommittedVersion = $version;
-                    $version = $version->next();
-                }
-                $lastInsertId = $this->connection->lastInsertId();
-                if (!is_numeric($lastInsertId)) {
-                    throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
+                    foreach ($commit->events as $event) {
+                        $this->commitEvent($commit->streamName, $event, $version);
+                        $lastCommittedVersion = $version;
+                        $version = $version->next();
+                    }
+                    $lastInsertId = $this->connection->lastInsertId();
+                    if (!is_numeric($lastInsertId)) {
+                        throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
+                    }
+                    $this->lastCommitResult = new CommitResult($lastCommittedVersion, SequenceNumber::fromInteger((int)$lastInsertId));
                 }
                 $this->connection->commit();
-                return new CommitResult($lastCommittedVersion, SequenceNumber::fromInteger((int)$lastInsertId));
+                return;
             } catch (UniqueConstraintViolationException $exception) {
                 if ($retryAttempt >= $maxRetryAttempts) {
                     $this->connection->rollBack();
