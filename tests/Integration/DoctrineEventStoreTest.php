@@ -5,11 +5,14 @@ namespace Neos\EventStore\DoctrineAdapter\Tests\Integration;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\DBAL\Exception as DbalException;
+use Doctrine\DBAL\Platforms\MySQLPlatform;
 use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Platforms\SqlitePlatform;
 use Neos\EventStore\DoctrineAdapter\DoctrineEventStore;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Model\EventStore\StatusType;
+use Neos\EventStore\Model\EventStream\ExpectedVersion;
+use Neos\EventStore\Model\EventStream\VirtualStreamName;
 use Neos\EventStore\Tests\Integration\AbstractEventStoreTestBase;
 use PHPUnit\Framework\Attributes\CoversClass;
 
@@ -94,5 +97,46 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
         $eventStore = new DoctrineEventStore($connection, self::eventTableName());
         $eventStore->setup();
         self::assertSame($eventStore->status()->type, StatusType::OK);
+    }
+
+    public function test_commit_handles_closed_connection(): void
+    {
+        // Trigger schema setup
+        $this->getEventStore();
+
+        // Connection closing as per https://github.com/doctrine/dbal/blob/4.2.3/tests/Functional/Connection/ConnectionLostTest.php
+        $connection = self::connection();
+        if ($connection->getDatabasePlatform() instanceof MySQLPlatform) {
+            $connection->executeStatement('SET SESSION wait_timeout=1');
+        } else {
+            self::markTestSkipped(sprintf('Platform %s is not tested for re-opening', $connection->getDatabasePlatform()::class));
+        }
+
+        sleep(2);
+        $this->commitEvent(['data' => 'a'], 'some-stream', ExpectedVersion::NO_STREAM());
+        self::assertEventStream($this->getEventStore()->load(VirtualStreamName::all()), [
+            ['version' => 0],
+        ]);
+    }
+
+    public function test_load_handles_closed_connection(): void
+    {
+        // Trigger schema setup
+        $this->getEventStore();
+        $this->commitEvent(['data' => 'a'], 'some-stream', ExpectedVersion::NO_STREAM());
+
+        // Connection closing as per https://github.com/doctrine/dbal/blob/4.2.3/tests/Functional/Connection/ConnectionLostTest.php
+        $connection = self::connection();
+        if ($connection->getDatabasePlatform() instanceof MySQLPlatform) {
+            $connection->executeStatement('SET SESSION wait_timeout=1');
+        } else {
+            self::markTestSkipped(sprintf('Platform %s is not tested for re-opening', $connection->getDatabasePlatform()::class));
+        }
+
+        sleep(2);
+
+        self::assertEventStream($this->getEventStore()->load(VirtualStreamName::all()), [
+            ['version' => 0],
+        ]);
     }
 }
