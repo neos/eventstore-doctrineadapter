@@ -2,7 +2,7 @@
 declare(strict_types=1);
 namespace Neos\EventStore\DoctrineAdapter;
 
-use Doctrine\DBAL\ForwardCompatibility\Result;
+use Doctrine\DBAL\Exception\ConnectionLost;
 use Doctrine\DBAL\Query\QueryBuilder;
 use Neos\EventStore\Model\Event;
 use Neos\EventStore\Model\Event\CausationId;
@@ -82,9 +82,11 @@ final class DoctrineEventStream implements EventStreamInterface
             $queryBuilder = $queryBuilder->orderBy('sequencenumber', 'DESC');
         }
 
-        $this->reconnectDatabaseConnection();
-
-        $result = $queryBuilder->executeQuery();
+        try {
+            $result = $queryBuilder->executeQuery();
+        } catch (ConnectionLost) {
+            $result = $queryBuilder->executeQuery();
+        }
         /** @var array<string, string> $row */
         foreach ($result->fetchAllAssociative() as $row) {
             $recordedAt = \DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $row['recordedat']);
@@ -105,18 +107,6 @@ final class DoctrineEventStream implements EventStreamInterface
                 SequenceNumber::fromInteger((int)$row['sequencenumber']),
                 $recordedAt
             );
-        }
-    }
-
-    // -----------------------------------
-
-    private function reconnectDatabaseConnection(): void
-    {
-        try {
-            $this->queryBuilder->getConnection()->fetchOne('SELECT 1');
-        } catch (\Exception $_) {
-            $this->queryBuilder->getConnection()->close();
-            $this->queryBuilder->getConnection()->connect();
         }
     }
 }

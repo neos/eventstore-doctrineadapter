@@ -60,7 +60,6 @@ final class DoctrineEventStore implements EventStoreInterface
 
     public function load(VirtualStreamName|StreamName $streamName, ?EventStreamFilter $filter = null): EventStreamInterface
     {
-        $this->reconnectDatabaseConnection();
         $queryBuilder = $this->connection->createQueryBuilder()
             ->select('*')
             ->from($this->eventTableName)
