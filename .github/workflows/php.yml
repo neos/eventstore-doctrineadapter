@@ -61,6 +61,17 @@ jobs:
         key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
         restore-keys: ${{ runner.os }}-composer-
 
+    - name : Define dynamic variable "CI_EVENTSTORE"
+      if: ${{ github.event.pull_request }}
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        php -r 'echo preg_match("/^\s*(CI_EVENTSTORE=[a-zA-Z0-9\/\.-]+)\s*$/m", getenv("PR_BODY"), $matches) === 1 ? $matches[1] : "";' >> $GITHUB_ENV
+
+    - name: Require event store dev version using "CI_EVENTSTORE"
+      if: ${{ env.CI_EVENTSTORE }}
+      run: composer require --no-update --no-interaction "neos/eventstore:dev-$CI_EVENTSTORE as 1.0"
+
 #    - name: Validate composer.json and composer.lock
 #      run: composer validate --strict
 
