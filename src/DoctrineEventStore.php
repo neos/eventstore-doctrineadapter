@@ -6,6 +6,7 @@ use DateTimeImmutable;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Driver\Exception as DriverException;
 use Doctrine\DBAL\Exception as DbalException;
+use Doctrine\DBAL\Exception\ConnectionLost;
 use Doctrine\DBAL\Exception\DeadlockException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
@@ -89,13 +90,14 @@ final class DoctrineEventStore implements EventStoreInterface
         $retryWaitInterval = 0.005;
         $maxRetryAttempts = 8;
         $retryAttempt = 0;
+        $lastSequenceNumber = null;
         while (true) {
-            $this->reconnectDatabaseConnection();
             if ($this->connection->getTransactionNestingLevel() > 0) {
                 throw new \RuntimeException('A transaction is active already, can\'t commit events!', 1547829131);
             }
-            $this->connection->beginTransaction();
             try {
+                // TODO waits for https://github.com/doctrine/dbal/issues/7371
+                $this->connection->beginTransaction();
                 $maybeVersion = $this->getStreamVersion($streamName);
                 $expectedVersion->verifyVersion($maybeVersion);
                 $version = $maybeVersion->isNothing() ? Version::first() : $maybeVersion->unwrap()->next();
@@ -109,8 +111,9 @@ final class DoctrineEventStore implements EventStoreInterface
                 if (!is_numeric($lastInsertId)) {
                     throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
                 }
+                $lastSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
                 $this->connection->commit();
-                return new CommitResult($lastCommittedVersion, SequenceNumber::fromInteger((int)$lastInsertId));
+                return new CommitResult($lastCommittedVersion, $lastSequenceNumber);
             } catch (UniqueConstraintViolationException $exception) {
                 if ($retryAttempt >= $maxRetryAttempts) {
                     $this->connection->rollBack();
@@ -121,6 +124,22 @@ final class DoctrineEventStore implements EventStoreInterface
                 $retryWaitInterval *= 2;
                 $this->connection->rollBack();
                 continue;
+            } catch (ConnectionLost) {
+                if (!$lastSequenceNumber) {
+                    continue;
+                }
+                // TODO does this make sense, can the connection be closed after everything was already commited?
+                // Is the $lastInsertId freed then and maybe written by from another thread?
+                $querybuilder = $this->connection->createQueryBuilder();
+                $eventsWhereCommited = $querybuilder->select('1')->from($this->eventTableName, 'e')
+                    ->where('e.sequencenumber = :sequenceNumber')
+                    ->setParameter('sequenceNumber', $lastSequenceNumber->value)
+                    ->fetchOne();
+                if (!$eventsWhereCommited) {
+                    continue;
+                }
+                // TODO store $lastCommittedVersion correctly
+                return new CommitResult($lastCommittedVersion, $lastSequenceNumber);
             } catch (DeadlockException | LockWaitTimeoutException $exception) {
                 $this->connection->rollBack();
                 throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
@@ -289,15 +308,5 @@ final class DoctrineEventStore implements EventStoreInterface
                 'recordedat' => Types::DATETIME_IMMUTABLE,
             ]
         );
-    }
-
-    private function reconnectDatabaseConnection(): void
-    {
-        try {
-            $this->connection->fetchOne('SELECT 1');
-        } catch (\Exception $_) {
-            $this->connection->close();
-            $this->connection->connect();
-        }
     }
 }
