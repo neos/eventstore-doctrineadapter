@@ -20,7 +20,7 @@
         "roave/security-advisories": "dev-latest",
         "phpstan/phpstan": "^1.10",
         "squizlabs/php_codesniffer": "^4.0.x-dev",
-        "phpunit/phpunit": "^10",
+        "phpunit/phpunit": "^11",
         "brianium/paratest": "^7.2"
     },
     "autoload": {
