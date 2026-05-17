@@ -92,7 +92,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         return $this->lastCommitResult;
     }
 
-    public function commitAll(CommitList $commitList): void
+    public function commitAll(CommitList $commits): void
     {
         # Exponential backoff: initial interval = 5ms and 8 retry attempts = max 1275ms (= 1,275 seconds)
         # @see http://backoffcalculator.com/?attempts=8&rate=2&interval=5
@@ -106,10 +106,16 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             }
             $this->connection->beginTransaction();
             try {
-                foreach ($commitList as $commit) {
+                foreach ($commits as $index => $commit) {
                     $maybeVersion = $this->getStreamVersion($commit->streamName);
-                    $commit->expectedVersion->verifyVersion($maybeVersion);
-                    $version = $maybeVersion->isNothing() ? Version::first() : $maybeVersion->unwrap()->next();
+                    if (!$commit->expectedVersion->isSatisfiedBy($maybeVersion)) {
+                        if ($commits->count() === 1) {
+                            throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpected($commit->expectedVersion, $maybeVersion, $commit->streamName);
+                        } else {
+                            throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpectedCommitAll($commit->expectedVersion, $maybeVersion, $commit->streamName, $index + 1, $commits->count());
+                        }
+                    }
+                    $version = $maybeVersion->nextVersionOrFirst();
                     $lastCommittedVersion = $version;
                     foreach ($commit->events as $event) {
                         $this->commitEvent($commit->streamName, $event, $version);
