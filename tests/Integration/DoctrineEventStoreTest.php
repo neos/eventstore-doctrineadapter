@@ -11,6 +11,7 @@ use Neos\EventStore\DoctrineAdapter\DoctrineEventStore;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Model\EventStore\StatusType;
 use Neos\EventStore\Tests\Integration\AbstractEventStoreTestBase;
+use Neos\EventStore\Tests\Integration\EventStoreFakeClock;
 use PHPUnit\Framework\Attributes\CoversClass;
 
 #[CoversClass(DoctrineEventStore::class)]
@@ -20,7 +21,7 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
 
     protected static function createEventStore(): EventStoreInterface
     {
-        return new DoctrineEventStore(self::connection(), self::eventTableName());
+        return new DoctrineEventStore(self::connection(), self::eventTableName(), EventStoreFakeClock::get());
     }
 
     public static function connection(): Connection
