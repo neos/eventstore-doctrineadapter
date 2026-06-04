@@ -45,20 +45,11 @@ use Psr\Clock\ClockInterface;
 
 final class DoctrineEventStore implements EventStoreInterface, WithResetInterface
 {
-    private readonly ClockInterface $clock;
-
     public function __construct(
         private readonly Connection $connection,
         private readonly string $eventTableName,
-        ?ClockInterface $clock = null
-    ) {
-        $this->clock = $clock ?? new class implements ClockInterface {
-            public function now(): DateTimeImmutable
-            {
-                return new DateTimeImmutable();
-            }
-        };
-    }
+        private readonly ClockInterface $clock
+    ) {}
 
     public function load(VirtualStreamName|StreamName $streamName, ?EventStreamFilter $filter = null): EventStreamInterface
     {
