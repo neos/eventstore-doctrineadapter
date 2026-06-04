@@ -34,8 +34,10 @@ use Neos\EventStore\Model\Event\SequenceNumber;
 use Neos\EventStore\Model\Event\StreamName;
 use Neos\EventStore\Model\Event\Version;
 use Neos\EventStore\Model\Events;
+use Neos\EventStore\Model\EventStore\CommitAllResult;
 use Neos\EventStore\Model\EventStore\CommitResult;
 use Neos\EventStore\Model\EventStore\Status;
+use Neos\EventStore\Model\EventStore\VersionForStream;
 use Neos\EventStore\Model\EventStream\EventStreamFilter;
 use Neos\EventStore\Model\EventStream\EventStreamInterface;
 use Neos\EventStore\Model\EventStream\ExpectedVersion;
@@ -92,13 +94,16 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         return $this->lastCommitResult;
     }
 
-    public function commitAll(CommitList $commits): void
+    public function commitAll(CommitList $commits): CommitAllResult
     {
         # Exponential backoff: initial interval = 5ms and 8 retry attempts = max 1275ms (= 1,275 seconds)
         # @see http://backoffcalculator.com/?attempts=8&rate=2&interval=5
         $retryWaitInterval = 0.005;
         $maxRetryAttempts = 8;
         $retryAttempt = 0;
+
+        $newStreamVersions = [];
+
         while (true) {
             $this->reconnectDatabaseConnection();
             if ($this->connection->getTransactionNestingLevel() > 0) {
@@ -127,9 +132,10 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                         throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
                     }
                     $this->lastCommitResult = new CommitResult($lastCommittedVersion, SequenceNumber::fromInteger((int)$lastInsertId));
+                    $newStreamVersions[$commit->streamName->value] = new VersionForStream($commit->streamName, $this->lastCommitResult->highestCommittedVersion);
                 }
                 $this->connection->commit();
-                return;
+                return CommitAllResult::create($this->lastCommitResult->highestCommittedSequenceNumber, ...$newStreamVersions);
             } catch (UniqueConstraintViolationException $exception) {
                 if ($retryAttempt >= $maxRetryAttempts) {
                     $this->connection->rollBack();
