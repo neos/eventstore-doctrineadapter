@@ -76,6 +76,18 @@ jobs:
           - { php: '8.5', db: { engine: mysql, image: 'mysql:latest', port: 3306, options: '--health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3' } }
           - { php: '8.5', db: { engine: pgsql, image: 'postgres:latest', port: 5432, options: '--health-cmd=pg_isready --health-interval=10s --health-timeout=5s --health-retries=3' } }
 
+    env:
+      DB_DSN: |
+        ${{ case(
+          matrix.db.engine == 'sqlite',
+            'sqlite:///events_test.sqlite',
+          matrix.db.engine == 'mysql',
+            format('pdo-mysql://neos:neos@127.0.0.1:{0}/eventstore', matrix.db.port),
+          matrix.db.engine == 'pgsql',
+            format('pdo-pgsql://neos:neos@127.0.0.1:{0}/eventstore', matrix.db.port),
+          ''
+        ) }}
+
     runs-on: ubuntu-latest
 
     services:
@@ -121,17 +133,8 @@ jobs:
     - name: Install dependencies
       run: composer install --prefer-dist --no-progress
 
-    - name: Run Tests
-      run: |
-        composer run test:integration
-        composer run test:consistency
-      env:
-        DB_DSN: |
-          ${{ case(
-            matrix.db.engine == 'sqlite',
-              'sqlite:///events_test.sqlite',
-            matrix.db.engine == 'mysql',
-              format('pdo-mysql://neos:neos@127.0.0.1:{0}/eventstore', matrix.db.port)
-            matrix.db.engine == 'pgsql',
-              format('pdo-pgsql://neos:neos@127.0.0.1:{0}/eventstore', matrix.db.port)
-          ) }}
+    - name: Run Integration Tests
+      run: composer run test:integration
+
+    - name: Run consistency Tests
+      run: composer run test:consistency
