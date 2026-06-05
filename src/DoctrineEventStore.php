@@ -10,6 +10,7 @@ use Doctrine\DBAL\Exception\DeadlockException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
+use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Platforms\SqlitePlatform;
 use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Schema\AbstractSchemaManager;
@@ -39,9 +40,10 @@ use Neos\EventStore\Model\EventStream\ExpectedVersion;
 use Neos\EventStore\Model\EventStream\MaybeVersion;
 use Neos\EventStore\Model\EventStream\VirtualStreamName;
 use Neos\EventStore\Model\EventStream\VirtualStreamType;
+use Neos\EventStore\WithResetInterface;
 use Psr\Clock\ClockInterface;
 
-final class DoctrineEventStore implements EventStoreInterface
+final class DoctrineEventStore implements EventStoreInterface, WithResetInterface
 {
     private readonly ClockInterface $clock;
 
@@ -157,6 +159,18 @@ final class DoctrineEventStore implements EventStoreInterface
     {
         foreach ($this->determineRequiredSqlStatements() as $statement) {
             $this->connection->executeStatement($statement);
+        }
+    }
+
+    public function reset(): void
+    {
+        if ($this->connection->getDatabasePlatform() instanceof SqlitePlatform) {
+            $this->connection->executeStatement('DELETE FROM ' . $this->eventTableName);
+            $this->connection->executeStatement('UPDATE SQLITE_SEQUENCE SET SEQ=0 WHERE NAME="' . $this->eventTableName . '"');
+        } elseif ($this->connection->getDatabasePlatform() instanceof PostgreSQLPlatform) {
+            $this->connection->executeStatement('TRUNCATE TABLE ' . $this->eventTableName . ' RESTART IDENTITY');
+        } else {
+            $this->connection->executeStatement('TRUNCATE TABLE ' . $this->eventTableName);
         }
     }
 

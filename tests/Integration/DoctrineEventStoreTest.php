@@ -23,22 +23,6 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
         return new DoctrineEventStore(self::connection(), self::eventTableName());
     }
 
-    protected static function resetEventStore(): void
-    {
-        $connection = self::connection();
-        if (!$connection->getSchemaManager()->tablesExist([self::eventTableName()])) {
-            return;
-        }
-        if ($connection->getDatabasePlatform() instanceof SqlitePlatform) {
-            $connection->executeStatement('DELETE FROM ' . self::eventTableName());
-            $connection->executeStatement('UPDATE SQLITE_SEQUENCE SET SEQ=0 WHERE NAME="' . self::eventTableName() . '"');
-        } elseif ($connection->getDatabasePlatform() instanceof PostgreSQLPlatform) {
-            $connection->executeStatement('TRUNCATE TABLE ' . self::eventTableName() . ' RESTART IDENTITY');
-        } else {
-            $connection->executeStatement('TRUNCATE TABLE ' . self::eventTableName());
-        }
-    }
-
     public static function connection(): Connection
     {
         if (self::$connection === null) {
