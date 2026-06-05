@@ -11,7 +11,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "neos/eventstore": "~1.0",
+        "neos/eventstore": "~2.0",
         "doctrine/dbal": "^3",
         "webmozart/assert": "^1.10",
         "psr/clock": "^1"
