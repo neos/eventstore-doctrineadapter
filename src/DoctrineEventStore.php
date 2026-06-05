@@ -49,7 +49,8 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         private readonly Connection $connection,
         private readonly string $eventTableName,
         private readonly ClockInterface $clock
-    ) {}
+    ) {
+    }
 
     public function load(VirtualStreamName|StreamName $streamName, ?EventStreamFilter $filter = null): EventStreamInterface
     {
