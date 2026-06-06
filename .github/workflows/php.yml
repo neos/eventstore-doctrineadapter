@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   static-analysis:
+    name: "Static analysis (PHP ${{ matrix.php }})"
 
     strategy:
       fail-fast: false
@@ -58,6 +59,8 @@ jobs:
   #      run: composer validate --strict
 
   tests:
+    name: "Tests (PHP ${{ matrix.php }}, ${{ matrix.db.image }})"
+
     strategy:
       fail-fast: false
       matrix:
@@ -151,6 +154,6 @@ jobs:
         ${{ case(
           matrix.db.engine == 'mysql',
             format('mysql -u neos -pneos -h 127.0.0.1 -P {0} eventstore --table < <(echo "SELECT * FROM events_test ORDER BY sequenceNumber DESC LIMIT 100")', matrix.db.port),
-          ''
+          'echo "Not implemented"'
         ) }}
         exit 1
