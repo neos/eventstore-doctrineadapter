@@ -136,5 +136,21 @@ jobs:
     - name: Run Integration Tests
       run: composer run test:integration
 
-    - name: Run consistency Tests
+    - name: Run Consistency Tests
+      id: consistencytests
       run: composer run test:consistency
+      timeout-minutes: 30
+      continue-on-error: true
+
+    - name: Fail pipeline if Consistency Tests broke
+      if: steps.consistencytests.outcome != 'success'
+      shell: bash
+      run: |
+        echo '${{ toJSON(steps) }}'
+        echo "\n\nDumping last 100 events\n\n"
+        ${{ case(
+          matrix.db.engine == 'mysql',
+            format('mysql -u neos -pneos -h 127.0.0.1 -P {0} eventstore --table < <(echo "SELECT * FROM events_test ORDER BY sequenceNumber DESC LIMIT 100")', matrix.db.port),
+          ''
+        ) }}
+        exit 1
