@@ -1,16 +1,18 @@
-name: CI
+name: build
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ "main", '[0-9]+.[0-9]' ]
+    branches: [ '[0-9]+.[0-9]' ]
   pull_request:
-    branches: [ "main", '[0-9]+.[0-9]' ]
+    branches: [ '[0-9]+.[0-9]' ]
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  static-analysis:
+    name: "Static analysis (PHP ${{ matrix.php }})"
 
     strategy:
       fail-fast: false
@@ -19,25 +21,92 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-versions }}
+          extensions: pdo_mysql, pdo_pgsql
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Prepare composer cache
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Cache Composer packages
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Require event store dev version
+        run: composer require --no-update --no-interaction "neos/eventstore:2.0.x-dev as 2.0"
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress
+
+      - name: Run PHPStan
+        run: composer run test:phpstan
+
+      - name: Run CS
+        run: composer run test:cs
+
+  #    - name: Validate composer.json and composer.lock
+  #      run: composer validate --strict
+
+  tests:
+    name: "Tests (PHP ${{ matrix.php }}, ${{ matrix.db.image }})"
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-versions: [ '8.2', '8.3', '8.4', '8.5' ]
+        db:
+          - { engine: mysql, image: 'mariadb:10.6', port: 3306, options: '--health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3' }
+          - { engine: pgsql, image: 'postgres:14-alpine', port: 5432, options: '--health-cmd=pg_isready --health-interval=10s --health-timeout=5s --health-retries=3' }
+        include:
+          # SQLite engines.
+          - { php: '8.4', db: { engine: sqlite, image: null } }
+          # MySQL engines.
+          - { php: '8.4', db: { engine: mysql, image: 'mysql:8.0', port: 3306, options: '--health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3' } }
+          - { php: '8.4', db: { engine: mysql, image: 'mysql:8.4', port: 3306, options: '--health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3' } }
+          # Bleeding-edge engines.
+          - { php: '8.5', db: { engine: mysql, image: 'mariadb:latest', port: 3306, options: '--health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=10s --health-timeout=5s --health-retries=3' } }
+          - { php: '8.5', db: { engine: mysql, image: 'mysql:latest', port: 3306, options: '--health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3' } }
+          - { php: '8.5', db: { engine: pgsql, image: 'postgres:latest', port: 5432, options: '--health-cmd=pg_isready --health-interval=10s --health-timeout=5s --health-retries=3' } }
+
+    env:
+      DB_DSN: |-
+        ${{ case(
+          matrix.db.engine == 'sqlite',
+            'sqlite:///events_test.sqlite',
+          matrix.db.engine == 'mysql',
+            format('pdo-mysql://neos:neos@127.0.0.1:{0}/eventstore', matrix.db.port),
+          matrix.db.engine == 'pgsql',
+            format('pdo-pgsql://neos:neos@127.0.0.1:{0}/eventstore', matrix.db.port),
+          ''
+        ) }}
+
+    runs-on: ubuntu-latest
+
     services:
-      mysql:
-        image: mysql:latest
+      database:
+        image: ${{ matrix.db.image }}
         env:
-          MYSQL_ALLOW_EMPTY_PASSWORD: false
-          MYSQL_ROOT_PASSWORD: password
+          MYSQL_USER: neos
+          MYSQL_PASSWORD: neos
           MYSQL_DATABASE: eventstore
-        ports:
-          - 3306/tcp
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
-      postgres:
-        image: postgres:latest
-        env:
-          POSTGRES_USER: root
-          POSTGRES_PASSWORD: password
+          MYSQL_ROOT_PASSWORD: neos
+          POSTGRES_USER: neos
+          POSTGRES_PASSWORD: neos
           POSTGRES_DB: eventstore
         ports:
-          - 5432/tcp
-        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 3
+          - "${{ matrix.db.port }}:${{ matrix.db.port }}"
+        options: ${{ matrix.db.options }}
 
     steps:
     - name: Setup PHP
@@ -64,23 +133,27 @@ jobs:
     - name: Require event store dev version
       run: composer require --no-update --no-interaction "neos/eventstore:2.0.x-dev as 2.0"
 
-#    - name: Validate composer.json and composer.lock
-#      run: composer validate --strict
-
     - name: Install dependencies
       run: composer install --prefer-dist --no-progress
 
-    - name: Run tests (SQLIte)
-      run: composer run-script test
-      env:
-        DB_DSN: "sqlite:///events_test.sqlite"
+    - name: Run Integration Tests
+      run: composer run test:integration
 
-    - name: Run tests (MySQL)
-      run: composer run-script test
-      env:
-        DB_DSN: "pdo-mysql://root:password@127.0.0.1:${{ job.services.mysql.ports['3306'] }}/eventstore"
+    - name: Run Consistency Tests
+      id: consistencytests
+      run: composer run test:consistency -v
+      timeout-minutes: 30
+      continue-on-error: true
 
-    - name: Run tests (PostgreSQL)
-      run: composer run-script test
-      env:
-        DB_DSN: "pdo-pgsql://root:password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/eventstore"
+    - name: Fail pipeline if Consistency Tests broke
+      if: steps.consistencytests.outcome != 'success'
+      shell: bash
+      run: |
+        echo '${{ toJSON(steps) }}'
+        echo "\n\nDumping last 100 events\n\n"
+        ${{ case(
+          matrix.db.engine == 'mysql',
+            format('mysql -u neos -pneos -h 127.0.0.1 -P {0} eventstore --table < <(echo "SELECT * FROM events_test ORDER BY sequenceNumber DESC LIMIT 100")', matrix.db.port),
+          'echo "Not implemented"'
+        ) }}
+        exit 1
