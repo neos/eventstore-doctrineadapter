@@ -22,7 +22,7 @@ use Doctrine\DBAL\Types\Types;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Exception\ConcurrencyException;
 use Neos\EventStore\Helper\BatchEventStream;
-use Neos\EventStore\Model\CommitList;
+use Neos\EventStore\Model\EventsForCommit;
 use Neos\EventStore\Model\Event;
 use Neos\EventStore\Model\Event\CausationId;
 use Neos\EventStore\Model\Event\CorrelationId;
@@ -82,14 +82,14 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         if ($events instanceof Event) {
             $events = Events::fromArray([$events]);
         }
-        return $this->commitAll(CommitList::createForEventsForStream(
+        return CommitResult::fromCommitAll($this->commitAll(EventsForCommit::createEventsForStreamAndExpectedVersion(
             streamName: $streamName,
             events: $events,
             expectedVersion: $expectedVersion,
-        ))->first();
+        )));
     }
 
-    public function commitAll(CommitList $commits): CommitAllResult
+    public function commitAll(EventsForCommit $commit): CommitAllResult
     {
         # Exponential backoff: initial interval = 5ms and 8 retry attempts = max 1275ms (= 1,275 seconds)
         # @see http://backoffcalculator.com/?attempts=8&rate=2&interval=5
@@ -107,19 +107,21 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             }
             $this->connection->beginTransaction();
             try {
-                foreach ($commits as $index => $commit) {
-                    $maybeVersion = $this->getStreamVersion($commit->streamName);
-                    if (!$commit->expectedVersion->isSatisfiedBy($maybeVersion)) {
-                        if ($commits->count() === 1) {
-                            throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpected($commit->expectedVersion, $maybeVersion, $commit->streamName);
-                        } else {
-                            throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpectedCommitAll($commit->expectedVersion, $maybeVersion, $commit->streamName, $index + 1, $commits->count());
-                        }
+                $initialStreamVersions = [];
+                // validation
+                foreach ($commit->expectedVersionForStreams as $expectedVersionForStream) {
+                    $maybeVersion = $this->getStreamVersion($expectedVersionForStream->streamName);
+                    $initialStreamVersions[$expectedVersionForStream->streamName->value] = $maybeVersion->nextVersionOrFirst();
+                    if (!$expectedVersionForStream->expectedVersion->isSatisfiedBy($maybeVersion)) {
+                        throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpected($expectedVersionForStream->expectedVersion, $maybeVersion, $expectedVersionForStream->streamName, $commit->expectedVersionForStreams);
                     }
-                    $version = $maybeVersion->nextVersionOrFirst();
+                }
+
+                foreach ($commit->eventsForStreams as $eventsForStream) {
+                    $version = $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
                     $lastCommittedVersion = $version;
-                    foreach ($commit->events as $event) {
-                        $this->commitEvent($commit->streamName, $event, $version);
+                    foreach ($eventsForStream->events as $event) {
+                        $this->commitEvent($eventsForStream->streamName, $event, $version);
                         $lastCommittedVersion = $version;
                         $version = $version->next();
                     }
@@ -128,9 +130,11 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                         throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
                     }
                     $highestCommittedSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
-                    $newStreamVersions[$commit->streamName->value] = new VersionForStream($commit->streamName, $lastCommittedVersion);
+                    $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
                 }
                 $this->connection->commit();
+                // Always set, as at least one iteration
+                assert($highestCommittedSequenceNumber !== null);
                 return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...$newStreamVersions));
             } catch (UniqueConstraintViolationException $exception) {
                 if ($retryAttempt >= $maxRetryAttempts) {
