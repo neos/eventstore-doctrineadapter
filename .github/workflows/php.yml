@@ -141,7 +141,7 @@ jobs:
 
     - name: Run Consistency Tests
       id: consistencytests
-      run: composer run test:consistency
+      run: composer run test:consistency -v
       timeout-minutes: 30
       continue-on-error: true
 
