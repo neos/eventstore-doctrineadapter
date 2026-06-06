@@ -2,7 +2,6 @@
 declare(strict_types=1);
 namespace Neos\EventStore\DoctrineAdapter;
 
-use DateTimeImmutable;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Driver\Exception as DriverException;
 use Doctrine\DBAL\Exception as DbalException;
@@ -23,7 +22,6 @@ use Doctrine\DBAL\Types\Types;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Exception\ConcurrencyException;
 use Neos\EventStore\Helper\BatchEventStream;
-use Neos\EventStore\Model\Commit;
 use Neos\EventStore\Model\CommitList;
 use Neos\EventStore\Model\Event;
 use Neos\EventStore\Model\Event\CausationId;
@@ -38,6 +36,7 @@ use Neos\EventStore\Model\EventStore\CommitAllResult;
 use Neos\EventStore\Model\EventStore\CommitResult;
 use Neos\EventStore\Model\EventStore\Status;
 use Neos\EventStore\Model\EventStore\VersionForStream;
+use Neos\EventStore\Model\EventStore\VersionForStreams;
 use Neos\EventStore\Model\EventStream\EventStreamFilter;
 use Neos\EventStore\Model\EventStream\EventStreamInterface;
 use Neos\EventStore\Model\EventStream\ExpectedVersion;
@@ -49,8 +48,6 @@ use Psr\Clock\ClockInterface;
 
 final class DoctrineEventStore implements EventStoreInterface, WithResetInterface
 {
-    private ?CommitResult $lastCommitResult = null;
-
     public function __construct(
         private readonly Connection $connection,
         private readonly string $eventTableName,
@@ -85,13 +82,11 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         if ($events instanceof Event) {
             $events = Events::fromArray([$events]);
         }
-        $this->commitAll(CommitList::create(new Commit(
+        return $this->commitAll(CommitList::createForEventsForStream(
             streamName: $streamName,
             events: $events,
             expectedVersion: $expectedVersion,
-        )));
-        // TODO dont use mutable state, either remove as unused or let commitAll() return big CommitResults
-        return $this->lastCommitResult;
+        ))->first();
     }
 
     public function commitAll(CommitList $commits): CommitAllResult
@@ -102,6 +97,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         $maxRetryAttempts = 8;
         $retryAttempt = 0;
 
+        $highestCommittedSequenceNumber = null;
         $newStreamVersions = [];
 
         while (true) {
@@ -131,11 +127,11 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                     if (!is_numeric($lastInsertId)) {
                         throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
                     }
-                    $this->lastCommitResult = new CommitResult($lastCommittedVersion, SequenceNumber::fromInteger((int)$lastInsertId));
-                    $newStreamVersions[$commit->streamName->value] = new VersionForStream($commit->streamName, $this->lastCommitResult->highestCommittedVersion);
+                    $highestCommittedSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
+                    $newStreamVersions[$commit->streamName->value] = new VersionForStream($commit->streamName, $lastCommittedVersion);
                 }
                 $this->connection->commit();
-                return CommitAllResult::create($this->lastCommitResult->highestCommittedSequenceNumber, ...$newStreamVersions);
+                return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...$newStreamVersions));
             } catch (UniqueConstraintViolationException $exception) {
                 if ($retryAttempt >= $maxRetryAttempts) {
                     $this->connection->rollBack();
