@@ -97,9 +97,6 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         $maxRetryAttempts = 8;
         $retryAttempt = 0;
 
-        $highestCommittedSequenceNumber = null;
-        $newStreamVersions = [];
-
         while (true) {
             $this->reconnectDatabaseConnection();
             if ($this->connection->getTransactionNestingLevel() > 0) {
@@ -117,6 +114,8 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                     }
                 }
 
+                $highestCommittedSequenceNumber = null;
+                $newStreamVersions = [];
                 foreach ($commit->eventsForStreams as $eventsForStream) {
                     $version = $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
                     $lastCommittedVersion = $version;
@@ -135,7 +134,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 $this->connection->commit();
                 // Always set, as at least one iteration
                 assert($highestCommittedSequenceNumber !== null);
-                return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...$newStreamVersions));
+                return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
             } catch (UniqueConstraintViolationException $exception) {
                 if ($retryAttempt >= $maxRetryAttempts) {
                     $this->connection->rollBack();
