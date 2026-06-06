@@ -45,19 +45,11 @@ use Psr\Clock\ClockInterface;
 
 final class DoctrineEventStore implements EventStoreInterface, WithResetInterface
 {
-    private readonly ClockInterface $clock;
-
     public function __construct(
         private readonly Connection $connection,
         private readonly string $eventTableName,
-        ?ClockInterface $clock = null
+        private readonly ClockInterface $clock
     ) {
-        $this->clock = $clock ?? new class implements ClockInterface {
-            public function now(): DateTimeImmutable
-            {
-                return new DateTimeImmutable();
-            }
-        };
     }
 
     public function load(VirtualStreamName|StreamName $streamName, ?EventStreamFilter $filter = null): EventStreamInterface
@@ -297,7 +289,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 'metadata' => $event->metadata?->toJson(),
                 'causationid' => $event->causationId?->value,
                 'correlationid' => $event->correlationId?->value,
-                'recordedat' => $this->clock->now(),
+                'recordedat' => $this->clock->now()->setTimezone(new \DateTimeZone('UTC')),
             ],
             [
                 'version' => Types::BIGINT,
