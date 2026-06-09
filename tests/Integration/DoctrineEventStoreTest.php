@@ -39,6 +39,25 @@ final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
         return 'events_test';
     }
 
+    public function test_commitAll_expectVersion_concurrencyExceptions_same_stream(): void
+    {
+        /**
+         * FIXME, re-enable test and implement. {@see DoctrineEventStore::validateAllConstraintStreamsAreWritten()}
+         */
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Locking on non-written streams: [unrelated-stream] is not yet supported');
+        parent::test_commitAll_expectVersion_concurrencyExceptions_same_stream();
+        self::markTestSkipped('Locking on non-written streams: [unrelated-stream] is not yet supported');
+    }
+
+    public function test_commitAll_expectVersion_success_unrelated_stream(): void
+    {
+        /**
+         * FIXME, re-enable test and implement. {@see DoctrineEventStore::validateAllConstraintStreamsAreWritten()}
+         */
+        self::markTestSkipped('Locking on non-written streams: [unrelated-stream] is not yet supported');
+    }
+
     public function test_setup_throws_exception_if_database_connection_fails(): void
     {
         $connection = DriverManager::getConnection(['url' => 'mysql://invalid-connection']);

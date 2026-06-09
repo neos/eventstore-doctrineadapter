@@ -97,6 +97,8 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         $maxRetryAttempts = 8;
         $retryAttempt = 0;
 
+        self::validateAllConstraintStreamsAreWritten($commit);
+
         while (true) {
             $this->reconnectDatabaseConnection();
             if ($this->connection->getTransactionNestingLevel() > 0) {
@@ -109,8 +111,8 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 foreach ($commit->expectedVersionForStreams as $expectedVersionForStream) {
                     $maybeVersion = $this->getStreamVersion($expectedVersionForStream->streamName);
                     $initialStreamVersions[$expectedVersionForStream->streamName->value] = $maybeVersion->nextVersionOrFirst();
-                    if (!$expectedVersionForStream->expectedVersion->isSatisfiedBy($maybeVersion)) {
-                        throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpected($expectedVersionForStream->expectedVersion, $maybeVersion, $expectedVersionForStream->streamName, $commit->expectedVersionForStreams);
+                    if (!$expectedVersionForStream->isSatisfiedBy($maybeVersion)) {
+                        throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpected($expectedVersionForStream, $maybeVersion, $commit->expectedVersionForStreams);
                     }
                 }
 
@@ -152,6 +154,28 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 $this->connection->rollBack();
                 throw $exception;
             }
+        }
+    }
+
+    /**
+     * FIXME, implement full support for locking foreign streams.
+     * This requires to use pessimistic locking as used here {@see https://github.com/bwaidelich/dcb-eventstore-doctrine/pull/52}
+     * Currently we only validate all constraints in PHP and rely on the database and unique index to prevent duplicates.
+     * This would no longer work when locking foreign streams as we dont write to them.
+     */
+    private static function validateAllConstraintStreamsAreWritten(EventsForCommit $commit): void
+    {
+        $streamsToLockMap = [];
+        foreach ($commit->expectedVersionForStreams as $eventsForStream) {
+            $streamsToLockMap[$eventsForStream->streamName->value] = true;
+        }
+        $streamsToWriteMap = [];
+        foreach ($commit->eventsForStreams as $eventsForStream) {
+            $streamsToWriteMap[$eventsForStream->streamName->value] = true;
+        }
+        $difference = array_diff_key($streamsToLockMap, $streamsToWriteMap);
+        if ($difference !== []) {
+            throw new \RuntimeException(sprintf('Locking on non-written streams: [%s] is not yet supported', join(', ', array_keys($difference))), 1781012037);
         }
     }
 
