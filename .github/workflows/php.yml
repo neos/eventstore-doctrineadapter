@@ -131,7 +131,7 @@ jobs:
         restore-keys: ${{ runner.os }}-composer-
 
     - name: Require event store dev version
-      run: composer require --no-update --no-interaction "neos/eventstore:2.0.x-dev as 2.0"
+      run: composer require --no-update --no-interaction "neos/eventstore:dev-feature/multi-stream-publish as 2.0"
 
     - name: Install dependencies
       run: composer install --prefer-dist --no-progress

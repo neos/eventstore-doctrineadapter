@@ -2,7 +2,6 @@
 declare(strict_types=1);
 namespace Neos\EventStore\DoctrineAdapter;
 
-use DateTimeImmutable;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Driver\Exception as DriverException;
 use Doctrine\DBAL\Exception as DbalException;
@@ -23,6 +22,7 @@ use Doctrine\DBAL\Types\Types;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Exception\ConcurrencyException;
 use Neos\EventStore\Helper\BatchEventStream;
+use Neos\EventStore\Model\EventsForCommit;
 use Neos\EventStore\Model\Event;
 use Neos\EventStore\Model\Event\CausationId;
 use Neos\EventStore\Model\Event\CorrelationId;
@@ -32,8 +32,11 @@ use Neos\EventStore\Model\Event\SequenceNumber;
 use Neos\EventStore\Model\Event\StreamName;
 use Neos\EventStore\Model\Event\Version;
 use Neos\EventStore\Model\Events;
+use Neos\EventStore\Model\EventStore\CommitAllResult;
 use Neos\EventStore\Model\EventStore\CommitResult;
 use Neos\EventStore\Model\EventStore\Status;
+use Neos\EventStore\Model\EventStore\VersionForStream;
+use Neos\EventStore\Model\EventStore\VersionForStreams;
 use Neos\EventStore\Model\EventStream\EventStreamFilter;
 use Neos\EventStore\Model\EventStream\EventStreamInterface;
 use Neos\EventStore\Model\EventStream\ExpectedVersion;
@@ -79,11 +82,23 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         if ($events instanceof Event) {
             $events = Events::fromArray([$events]);
         }
+        return CommitResult::fromCommitAll($this->commitAll(EventsForCommit::createEventsForStreamAndExpectedVersion(
+            streamName: $streamName,
+            events: $events,
+            expectedVersion: $expectedVersion,
+        )));
+    }
+
+    public function commitAll(EventsForCommit $commit): CommitAllResult
+    {
         # Exponential backoff: initial interval = 5ms and 8 retry attempts = max 1275ms (= 1,275 seconds)
         # @see http://backoffcalculator.com/?attempts=8&rate=2&interval=5
         $retryWaitInterval = 0.005;
         $maxRetryAttempts = 8;
         $retryAttempt = 0;
+
+        self::validateAllConstraintStreamsAreWritten($commit);
+
         while (true) {
             $this->reconnectDatabaseConnection();
             if ($this->connection->getTransactionNestingLevel() > 0) {
@@ -91,21 +106,37 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             }
             $this->connection->beginTransaction();
             try {
-                $maybeVersion = $this->getStreamVersion($streamName);
-                $expectedVersion->verifyVersion($maybeVersion);
-                $version = $maybeVersion->isNothing() ? Version::first() : $maybeVersion->unwrap()->next();
-                $lastCommittedVersion = $version;
-                foreach ($events as $event) {
-                    $this->commitEvent($streamName, $event, $version);
-                    $lastCommittedVersion = $version;
-                    $version = $version->next();
+                $initialStreamVersions = [];
+                // validation
+                foreach ($commit->expectedStreamConstraints as $expectedStreamConstraint) {
+                    $maybeVersion = $this->getStreamVersion($expectedStreamConstraint->streamName);
+                    $initialStreamVersions[$expectedStreamConstraint->streamName->value] = $maybeVersion->nextVersionOrFirst();
+                    if (!$expectedStreamConstraint->isSatisfiedBy($maybeVersion)) {
+                        throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpectedConstraint($expectedStreamConstraint, $maybeVersion, $commit->expectedStreamConstraints);
+                    }
                 }
-                $lastInsertId = $this->connection->lastInsertId();
-                if (!is_numeric($lastInsertId)) {
-                    throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
+
+                $highestCommittedSequenceNumber = null;
+                $newStreamVersions = [];
+                foreach ($commit->eventsForStreams as $eventsForStream) {
+                    $version = $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
+                    $lastCommittedVersion = $version;
+                    foreach ($eventsForStream->events as $event) {
+                        $this->commitEvent($eventsForStream->streamName, $event, $version);
+                        $lastCommittedVersion = $version;
+                        $version = $version->next();
+                    }
+                    $lastInsertId = $this->connection->lastInsertId();
+                    if (!is_numeric($lastInsertId)) {
+                        throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
+                    }
+                    $highestCommittedSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
+                    $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
                 }
                 $this->connection->commit();
-                return new CommitResult($lastCommittedVersion, SequenceNumber::fromInteger((int)$lastInsertId));
+                // Always set, as at least one iteration
+                assert($highestCommittedSequenceNumber !== null);
+                return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
             } catch (UniqueConstraintViolationException $exception) {
                 if ($retryAttempt >= $maxRetryAttempts) {
                     $this->connection->rollBack();
@@ -123,6 +154,28 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 $this->connection->rollBack();
                 throw $exception;
             }
+        }
+    }
+
+    /**
+     * FIXME, implement full support for locking foreign streams.
+     * This requires to use pessimistic locking as used here {@see https://github.com/bwaidelich/dcb-eventstore-doctrine/pull/52}
+     * Currently we only validate all constraints in PHP and rely on the database and unique index to prevent duplicates.
+     * This would no longer work when locking foreign streams as we dont write to them.
+     */
+    private static function validateAllConstraintStreamsAreWritten(EventsForCommit $commit): void
+    {
+        $streamsToLockMap = [];
+        foreach ($commit->expectedStreamConstraints as $eventsForStream) {
+            $streamsToLockMap[$eventsForStream->streamName->value] = true;
+        }
+        $streamsToWriteMap = [];
+        foreach ($commit->eventsForStreams as $eventsForStream) {
+            $streamsToWriteMap[$eventsForStream->streamName->value] = true;
+        }
+        $difference = array_diff_key($streamsToLockMap, $streamsToWriteMap);
+        if ($difference !== []) {
+            throw new \RuntimeException(sprintf('Locking on non-written streams: [%s] is not yet supported', join(', ', array_keys($difference))), 1781012037);
         }
     }
 
