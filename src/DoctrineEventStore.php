@@ -108,11 +108,11 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             try {
                 $initialStreamVersions = [];
                 // validation
-                foreach ($commit->expectedVersionForStreams as $expectedVersionForStream) {
-                    $maybeVersion = $this->getStreamVersion($expectedVersionForStream->streamName);
-                    $initialStreamVersions[$expectedVersionForStream->streamName->value] = $maybeVersion->nextVersionOrFirst();
-                    if (!$expectedVersionForStream->isSatisfiedBy($maybeVersion)) {
-                        throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpected($expectedVersionForStream, $maybeVersion, $commit->expectedVersionForStreams);
+                foreach ($commit->expectedStreamConstraints as $expectedStreamConstraint) {
+                    $maybeVersion = $this->getStreamVersion($expectedStreamConstraint->streamName);
+                    $initialStreamVersions[$expectedStreamConstraint->streamName->value] = $maybeVersion->nextVersionOrFirst();
+                    if (!$expectedStreamConstraint->isSatisfiedBy($maybeVersion)) {
+                        throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpectedConstraint($expectedStreamConstraint, $maybeVersion, $commit->expectedStreamConstraints);
                     }
                 }
 
@@ -166,7 +166,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     private static function validateAllConstraintStreamsAreWritten(EventsForCommit $commit): void
     {
         $streamsToLockMap = [];
-        foreach ($commit->expectedVersionForStreams as $eventsForStream) {
+        foreach ($commit->expectedStreamConstraints as $eventsForStream) {
             $streamsToLockMap[$eventsForStream->streamName->value] = true;
         }
         $streamsToWriteMap = [];
