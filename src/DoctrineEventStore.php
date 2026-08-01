@@ -119,7 +119,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 $highestCommittedSequenceNumber = null;
                 $newStreamVersions = [];
                 foreach ($commit->eventsForStreams as $eventsForStream) {
-                    $version = $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
+                    $version = ($newStreamVersions[$eventsForStream->streamName->value] ?? null)?->version->next() ?? $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
                     $lastCommittedVersion = $version;
                     foreach ($eventsForStream->events as $event) {
                         $this->commitEvent($eventsForStream->streamName, $event, $version);
