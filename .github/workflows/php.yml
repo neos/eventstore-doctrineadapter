@@ -44,7 +44,8 @@ jobs:
           restore-keys: ${{ runner.os }}-composer-
 
       - name: Require event store dev version
-        run: composer require --no-update --no-interaction "neos/eventstore:2.0.x-dev as 2.0"
+        # TODO point back to "neos/eventstore:2.0.x-dev as 2.0" once task/improve-tests is merged
+        run: composer require --no-update --no-interaction "neos/eventstore:dev-task/improve-tests as 2.0"
 
       - name: Install dependencies
         run: composer install --prefer-dist --no-progress
@@ -131,7 +132,8 @@ jobs:
         restore-keys: ${{ runner.os }}-composer-
 
     - name: Require event store dev version
-      run: composer require --no-update --no-interaction "neos/eventstore:dev-feature/multi-stream-publish as 2.0"
+      # TODO point back to "neos/eventstore:2.0.x-dev as 2.0" once task/improve-tests is merged
+      run: composer require --no-update --no-interaction "neos/eventstore:dev-task/improve-tests as 2.0"
 
     - name: Install dependencies
       run: composer install --prefer-dist --no-progress
@@ -139,9 +141,18 @@ jobs:
     - name: Run Integration Tests
       run: composer run test:integration
 
+    # SQLite only runs the contention profile. It allows a single writer at a time, so with 10 concurrent
+    # processes a commit that is provably satisfiable still gets rejected with "database is locked" – which
+    # is what the isolation profile, by design, reports as a violation. The contention profile tolerates
+    # those rejections and still covers every consistency check, including the constraint guarantees.
     - name: Run Consistency Tests
       id: consistencytests
-      run: composer run test:consistency -v
+      run: |
+        composer run ${{ case(
+          matrix.db.engine == 'sqlite',
+            'test:consistency:contention',
+          'test:consistency'
+        ) }} -v
       timeout-minutes: 30
       continue-on-error: true
 

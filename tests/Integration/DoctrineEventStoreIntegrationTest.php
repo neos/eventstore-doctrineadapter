@@ -13,50 +13,10 @@ use Neos\EventStore\Tests\Integration\EventStoreFakeClock;
 use PHPUnit\Framework\Attributes\CoversClass;
 
 #[CoversClass(DoctrineEventStore::class)]
-final class DoctrineEventStoreTest extends AbstractEventStoreTestBase
+final class DoctrineEventStoreIntegrationTest extends AbstractEventStoreTestBase
 {
-    private static ?Connection $connection = null;
 
-    protected static function createEventStore(): EventStoreInterface
-    {
-        return new DoctrineEventStore(self::connection(), self::eventTableName(), EventStoreFakeClock::get());
-    }
-
-    public static function connection(): Connection
-    {
-        if (self::$connection === null) {
-            $dsn = getenv('DB_DSN');
-            if (!is_string($dsn)) {
-                $dsn = 'sqlite:///events_test.sqlite';
-            }
-            self::$connection = DriverManager::getConnection(['url' => $dsn]);
-        }
-        return self::$connection;
-    }
-
-    public static function eventTableName(): string
-    {
-        return 'events_test';
-    }
-
-    public function test_commitAll_expectVersion_concurrencyExceptions_same_stream(): void
-    {
-        /**
-         * FIXME, re-enable test and implement. {@see DoctrineEventStore::validateAllConstraintStreamsAreWritten()}
-         */
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Locking on non-written streams: [unrelated-stream] is not yet supported');
-        parent::test_commitAll_expectVersion_concurrencyExceptions_same_stream();
-        self::markTestSkipped('Locking on non-written streams: [unrelated-stream] is not yet supported');
-    }
-
-    public function test_commitAll_expectVersion_success_unrelated_stream(): void
-    {
-        /**
-         * FIXME, re-enable test and implement. {@see DoctrineEventStore::validateAllConstraintStreamsAreWritten()}
-         */
-        self::markTestSkipped('Locking on non-written streams: [unrelated-stream] is not yet supported');
-    }
+    use DoctrineEventStoreTrait;
 
     public function test_setup_throws_exception_if_database_connection_fails(): void
     {

@@ -11,7 +11,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "neos/eventstore": "~2.0",
+        "neos/eventstore": "@dev",
         "doctrine/dbal": "^3",
         "webmozart/assert": "^1.10",
         "psr/clock": "^1"
@@ -38,11 +38,20 @@
         "test:phpstan": "phpstan",
         "test:cs": "phpcs --colors src",
         "test:cs:fix": "phpcbf --colors src",
-        "test:integration": "phpunit tests/Integration --exclude-group=parallel",
+        "test:integration": "phpunit tests/Integration/DoctrineEventStoreIntegrationTest.php",
         "test:consistency": [
-            "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreTest::consistency_prepare",
-            "paratest tests/Integration --group=parallel --functional --processes 10",
-            "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreTest::consistency_validateEvents"
+            "@test:consistency:contention",
+            "@test:consistency:isolation"
+        ],
+        "test:consistency:contention": [
+            "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreConsistencyTest::prepareContentionProfile",
+            "paratest tests/Integration/DoctrineEventStoreConsistencyTest.php --functional --processes 10 --no-progress",
+            "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreConsistencyTest::validate"
+        ],
+        "test:consistency:isolation": [
+            "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreConsistencyTest::prepareIsolationProfile",
+            "paratest tests/Integration/DoctrineEventStoreConsistencyTest.php --functional --processes 10 --no-progress",
+            "Neos\\EventStore\\DoctrineAdapter\\Tests\\Integration\\DoctrineEventStoreConsistencyTest::validate"
         ],
         "test": [
             "@test:phpstan",
