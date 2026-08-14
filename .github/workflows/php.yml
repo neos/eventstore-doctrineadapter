@@ -141,18 +141,9 @@ jobs:
     - name: Run Integration Tests
       run: composer run test:integration
 
-    # SQLite only runs the contention profile. It allows a single writer at a time, so with 10 concurrent
-    # processes a commit that is provably satisfiable still gets rejected with "database is locked" – which
-    # is what the isolation profile, by design, reports as a violation. The contention profile tolerates
-    # those rejections and still covers every consistency check, including the constraint guarantees.
     - name: Run Consistency Tests
       id: consistencytests
-      run: |
-        composer run ${{ case(
-          matrix.db.engine == 'sqlite',
-            'test:consistency:contention',
-          'test:consistency'
-        ) }} -v
+      run: composer run test:consistency -v
       timeout-minutes: 30
       continue-on-error: true
 

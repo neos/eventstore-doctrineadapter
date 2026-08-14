@@ -13,6 +13,11 @@ use Neos\EventStore\EventStoreInterface;
 
 trait DoctrineEventStoreTrait
 {
+    /**
+     * How long a SQLite connection waits for the write lock before giving up
+     */
+    private const SQLITE_BUSY_TIMEOUT_SECONDS = 30;
+
     private static ?Connection $connection = null;
 
     protected static function createEventStore(): EventStoreInterface
@@ -58,7 +63,16 @@ trait DoctrineEventStoreTrait
             if (!is_string($dsn)) {
                 $dsn = 'sqlite:///events_test.sqlite';
             }
-            self::$connection = DriverManager::getConnection(['url' => $dsn]);
+            $params = ['url' => $dsn];
+            if (str_starts_with($dsn, 'sqlite')) {
+                // SQLite allows a single writer at a time. Without a busy timeout the loser of a race
+                // fails immediately with "database is locked" instead of waiting for its turn, which the
+                // consistency tests rightly report as a commit that should have succeeded.
+                // Passed as a driver option rather than as a PRAGMA so that it survives the reconnect in
+                // DoctrineEventStore::reconnectDatabaseConnection().
+                $params['driverOptions'] = [\PDO::ATTR_TIMEOUT => self::SQLITE_BUSY_TIMEOUT_SECONDS];
+            }
+            self::$connection = DriverManager::getConnection($params);
         }
         return self::$connection;
     }

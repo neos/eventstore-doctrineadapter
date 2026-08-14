@@ -117,10 +117,12 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
 
     public function commitAll(EventsForCommit $commit): CommitAllResult
     {
-        # Exponential backoff: initial interval = 5ms and 8 retry attempts = max 1275ms (= 1,275 seconds)
-        # @see http://backoffcalculator.com/?attempts=8&rate=2&interval=5
+        # Exponential backoff, capped: 5ms doubling up to 100ms over 12 attempts = at most ~855ms of
+        # waiting. A commit loses a race in microseconds, so more attempts are worth more than longer
+        # naps - especially where the database aborts the loser outright instead of letting it wait
         $retryWaitInterval = 0.005;
-        $maxRetryAttempts = 8;
+        $maxRetryWaitInterval = 0.1;
+        $maxRetryAttempts = 12;
         $retryAttempt = 0;
 
         $this->validateConstraintsOnUnwrittenStreamsAreSupported($commit);
@@ -183,11 +185,22 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 }
                 $retryDelayMicroseconds = (int)($retryWaitInterval * 1E6);
                 $retryAttempt++;
-                $retryWaitInterval *= 2;
+                $retryWaitInterval = min($retryWaitInterval * 2, $maxRetryWaitInterval);
                 $this->connection->rollBack();
             } catch (DeadlockException | LockWaitTimeoutException $exception) {
+                // Where commits are kept apart by a lock, this means the wait for it ran out and retrying
+                // would only prolong it. Where they are not, the database resolves contention by aborting
+                // one of the conflicting transactions rather than letting it wait – SQLite does so without
+                // even consulting its busy timeout once a reading transaction needs to become a writing
+                // one – which makes this the same lost race as a version conflict, and it is retried alike
+                if ($this->streamLocking() !== self::STREAM_LOCKS_IMPLICIT || $retryAttempt >= $maxRetryAttempts) {
+                    $this->connection->rollBack();
+                    throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
+                }
+                $retryDelayMicroseconds = (int)($retryWaitInterval * 1E6);
+                $retryAttempt++;
+                $retryWaitInterval = min($retryWaitInterval * 2, $maxRetryWaitInterval);
                 $this->connection->rollBack();
-                throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
             } catch (DbalException | ConcurrencyException | \JsonException $exception) {
                 $this->connection->rollBack();
                 throw $exception;
