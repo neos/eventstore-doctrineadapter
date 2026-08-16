@@ -8,7 +8,6 @@ use Doctrine\DBAL\Exception as DbalException;
 use Doctrine\DBAL\Exception\DeadlockException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
-use Doctrine\DBAL\Platforms\AbstractMySQLPlatform;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Platforms\SqlitePlatform;
@@ -49,36 +48,14 @@ use Psr\Clock\ClockInterface;
 
 final class DoctrineEventStore implements EventStoreInterface, WithResetInterface
 {
-    /**
-     * How long a commit waits for the lock of a stream another commit is currently holding
-     */
-    private const LOCK_TIMEOUT_SECONDS = 10;
-
-    /**
-     * Streams are locked through MySQL's GET_LOCK() / RELEASE_LOCK()
-     */
-    private const STREAM_LOCKS_ADVISORY_MYSQL = 'advisory-mysql';
-
-    /**
-     * Streams are locked through PostgreSQL's pg_advisory_lock() / pg_advisory_unlock()
-     */
-    private const STREAM_LOCKS_ADVISORY_POSTGRES = 'advisory-postgres';
-
-    /**
-     * The platform keeps conflicting commits apart on its own, no explicit lock required
-     */
-    private const STREAM_LOCKS_IMPLICIT = 'implicit';
-
-    /**
-     * There is no way to lock a stream on this platform
-     */
-    private const STREAM_LOCKS_NONE = 'none';
+    private readonly StreamLocks $streamLocks;
 
     public function __construct(
         private readonly Connection $connection,
         private readonly string $eventTableName,
         private readonly ClockInterface $clock
     ) {
+        $this->streamLocks = new StreamLocks($connection, $eventTableName);
     }
 
     public function load(VirtualStreamName|StreamName $streamName, ?EventStreamFilter $filter = null): EventStreamInterface
@@ -125,8 +102,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         $maxRetryAttempts = 12;
         $retryAttempt = 0;
 
-        $this->validateConstraintsOnUnwrittenStreamsAreSupported($commit);
-        $streamNamesToLock = self::streamNamesToLock($commit);
+        $streamNamesToLock = self::streamNamesTouchedBy($commit);
 
         while (true) {
             $this->reconnectDatabaseConnection();
@@ -136,13 +112,13 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             // Deliberately *outside* the transaction: a lock taken within it would only fence off concurrent
             // writers from the point it is granted onwards, while the version reads could still be answered
             // from a snapshot that predates the commit of whoever held the lock before us
-            $acquiredLocks = $this->acquireStreamLocks($streamNamesToLock);
+            $locks = $this->streamLocks->acquire($streamNamesToLock);
             try {
                 $this->connection->beginTransaction();
             } catch (\Throwable $exception) {
                 // the locks outlive the transaction that failed to start, so they have to go explicitly –
                 // they are bound to the session, not to the transaction
-                $this->releaseStreamLocks($acquiredLocks);
+                $locks->release();
                 throw $exception;
             }
             $retryDelayMicroseconds = 0;
@@ -188,12 +164,9 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 $retryWaitInterval = min($retryWaitInterval * 2, $maxRetryWaitInterval);
                 $this->connection->rollBack();
             } catch (DeadlockException | LockWaitTimeoutException $exception) {
-                // Where commits are kept apart by a lock, this means the wait for it ran out and retrying
-                // would only prolong it. Where they are not, the database resolves contention by aborting
-                // one of the conflicting transactions rather than letting it wait – SQLite does so without
-                // even consulting its busy timeout once a reading transaction needs to become a writing
-                // one – which makes this the same lost race as a version conflict, and it is retried alike
-                if ($this->streamLocking() !== self::STREAM_LOCKS_IMPLICIT || $retryAttempt >= $maxRetryAttempts) {
+                // An aborted commit is the same lost race as a version conflict and is retried alike; a
+                // lock that timed out is not {@see StreamLockMode::resolvesContentionByAborting()}
+                if (!$this->streamLocks->resolvesContentionByAborting() || $retryAttempt >= $maxRetryAttempts) {
                     $this->connection->rollBack();
                     throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
                 }
@@ -207,7 +180,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             } finally {
                 // after the COMMIT on the success path, so that no concurrent commit can observe the store
                 // between this commit's constraint check and the events it wrote
-                $this->releaseStreamLocks($acquiredLocks);
+                $locks->release();
             }
             // Only the retrying branch above gets here – every other one returns or throws. The backoff
             // deliberately waits *after* the locks are gone: sleeping while holding them would block the
@@ -217,21 +190,11 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     }
 
     /**
-     * The streams a commit has to hold a lock on while it runs, in a stable order
-     *
-     * All streams it touches, not only the constrained ones. An advisory lock only fences off commits
-     * that ask for the same lock, so a commit that merely *writes* a stream has to take part as well –
-     * otherwise it would be free to slip in between a concurrent commit's constraint check on that stream
-     * and its COMMIT. For a stream that is written *and* constrained the unique index on (stream, version)
-     * would catch that on its own, but for a constraint on a stream this commit does not write there is no
-     * index entry to collide with, and the lock is the only thing standing between the two.
-     *
-     * Sorting is what keeps two commits over overlapping stream sets from deadlocking against each other:
-     * both walk the same total order, so one of them always gets all its locks.
+     * Every stream this commit reads or writes, in no particular order
      *
      * @return list<string>
      */
-    private static function streamNamesToLock(EventsForCommit $commit): array
+    private static function streamNamesTouchedBy(EventsForCommit $commit): array
     {
         $streamNames = [];
         foreach ($commit->eventsForStreams as $eventsForStream) {
@@ -240,140 +203,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         foreach ($commit->expectedStreamConstraints as $expectedStreamConstraint) {
             $streamNames[$expectedStreamConstraint->streamName->value] = true;
         }
-        $streamNames = array_keys($streamNames);
-        sort($streamNames);
-        return $streamNames;
-    }
-
-    /**
-     * How this platform keeps two commits that touch the same stream apart
-     *
-     * A single source of truth on purpose: which lock {@see acquireStreamLocks()} takes and which commits
-     * {@see validateConstraintsOnUnwrittenStreamsAreSupported()} lets through are two answers to the same
-     * question. A platform added to one of them but forgotten in the other would silently accept
-     * constraints that nothing guards, which is the one failure mode that leaves no trace.
-     *
-     * @return self::STREAM_LOCKS_*
-     */
-    private function streamLocking(): string
-    {
-        $platform = $this->connection->getDatabasePlatform();
-        return match (true) {
-            $platform instanceof AbstractMySQLPlatform => self::STREAM_LOCKS_ADVISORY_MYSQL,
-            $platform instanceof PostgreSQLPlatform => self::STREAM_LOCKS_ADVISORY_POSTGRES,
-            // SQLite allows a single writer at a time: a concurrent commit can neither take the write lock
-            // while this transaction is still reading (rollback journal), nor commit ahead of it without
-            // this transaction's own INSERT being rejected afterwards (WAL, SQLITE_BUSY_SNAPSHOT)
-            $platform instanceof SqlitePlatform => self::STREAM_LOCKS_IMPLICIT,
-            default => self::STREAM_LOCKS_NONE,
-        };
-    }
-
-    /**
-     * @param list<string> $streamNames
-     * @return list<string> the streams that were actually locked, to be handed to {@see releaseStreamLocks()}
-     */
-    private function acquireStreamLocks(array $streamNames): array
-    {
-        $streamLocking = $this->streamLocking();
-        if ($streamLocking === self::STREAM_LOCKS_IMPLICIT || $streamLocking === self::STREAM_LOCKS_NONE) {
-            return [];
-        }
-        $acquiredLocks = [];
-        try {
-            foreach ($streamNames as $streamName) {
-                if ($streamLocking === self::STREAM_LOCKS_ADVISORY_POSTGRES) {
-                    $this->connection->executeStatement('SELECT pg_advisory_lock(CAST(? AS bigint))', [self::postgresLockKey($this->lockIdentity($streamName))]);
-                } else {
-                    // 1 = acquired, 0 = timed out, NULL = the lock could not be obtained at all
-                    $acquired = $this->connection->fetchOne('SELECT GET_LOCK(?, ?)', [$this->lockIdentity($streamName), self::LOCK_TIMEOUT_SECONDS]);
-                    if (!is_numeric($acquired) || (int)$acquired !== 1) {
-                        throw new ConcurrencyException(sprintf('Failed to acquire lock for stream "%s" within %d seconds', $streamName, self::LOCK_TIMEOUT_SECONDS), 1781012038);
-                    }
-                }
-                $acquiredLocks[] = $streamName;
-            }
-        } catch (\Throwable $exception) {
-            $this->releaseStreamLocks($acquiredLocks);
-            throw $exception;
-        }
-        return $acquiredLocks;
-    }
-
-    /**
-     * @param list<string> $streamNames
-     */
-    private function releaseStreamLocks(array $streamNames): void
-    {
-        if ($streamNames === []) {
-            return;
-        }
-        $streamLocking = $this->streamLocking();
-        // only the locks this connection actually took are released, so that advisory locks the
-        // application might use for its own purposes on the same connection are left alone
-        foreach ($streamNames as $streamName) {
-            try {
-                if ($streamLocking === self::STREAM_LOCKS_ADVISORY_POSTGRES) {
-                    $this->connection->executeStatement('SELECT pg_advisory_unlock(CAST(? AS bigint))', [self::postgresLockKey($this->lockIdentity($streamName))]);
-                } elseif ($streamLocking === self::STREAM_LOCKS_ADVISORY_MYSQL) {
-                    $this->connection->executeStatement('SELECT RELEASE_LOCK(?)', [$this->lockIdentity($streamName)]);
-                }
-            } catch (DbalException $_) {
-                // A lock that cannot be released is a lock that is no longer held: advisory locks live and
-                // die with the session, so a connection that is gone has dropped them already. Releasing
-                // happens in a finally block, where throwing would replace the exception that got us here
-                // – or turn an already committed commit into a failed one.
-            }
-        }
-    }
-
-    /**
-     * A stable lock identity for a stream, as a 64 character hash
-     *
-     * Stream names can be {@see StreamName::MAX_LENGTH} characters long while MySQL lock names are limited
-     * to 64, so the name is hashed rather than used directly. The event table is part of the hash, so that
-     * two event stores sharing one database do not lock each other.
-     */
-    private function lockIdentity(string $streamName): string
-    {
-        return hash('sha256', $this->eventTableName . ':' . $streamName);
-    }
-
-    /**
-     * PostgreSQL advisory locks are keyed by a 64 bit integer rather than by name, so the first 60 bits of
-     * the hash are used – a collision costs two unrelated streams a shared lock, never correctness
-     */
-    private static function postgresLockKey(string $lockIdentity): int
-    {
-        return (int)hexdec(substr($lockIdentity, 0, 15));
-    }
-
-    /**
-     * Constraints on streams the commit does not write to are only as good as the lock that guards them
-     *
-     * On a platform without one, such a commit could still be validated against a version another process
-     * has already moved on from, so it is rejected before anything is written rather than silently
-     * accepted. Everything else keeps working there: a constraint on a stream the commit *does* write is
-     * guarded by the unique index on (stream, version), whether or not the platform can lock.
-     */
-    private function validateConstraintsOnUnwrittenStreamsAreSupported(EventsForCommit $commit): void
-    {
-        if ($this->streamLocking() !== self::STREAM_LOCKS_NONE) {
-            return;
-        }
-        $writtenStreamNames = [];
-        foreach ($commit->eventsForStreams as $eventsForStream) {
-            $writtenStreamNames[$eventsForStream->streamName->value] = true;
-        }
-        $unwrittenStreamNames = [];
-        foreach ($commit->expectedStreamConstraints as $expectedStreamConstraint) {
-            if (!isset($writtenStreamNames[$expectedStreamConstraint->streamName->value])) {
-                $unwrittenStreamNames[$expectedStreamConstraint->streamName->value] = true;
-            }
-        }
-        if ($unwrittenStreamNames !== []) {
-            throw new \RuntimeException(sprintf('Constraints on streams that are not written to ([%s]) are not supported on platform %s because it provides no way to lock a stream', join(', ', array_keys($unwrittenStreamNames)), $this->connection->getDatabasePlatform()::class), 1781012037);
-        }
+        return array_keys($streamNames);
     }
 
     public function deleteStream(StreamName $streamName): void
