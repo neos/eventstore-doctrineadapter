@@ -93,73 +93,53 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
 
     public function commitAll(EventsForCommit $commit): CommitAllResult
     {
-        # Exponential backoff: initial interval = 5ms and 8 retry attempts = max 1275ms (= 1,275 seconds)
-        # @see http://backoffcalculator.com/?attempts=8&rate=2&interval=5
-        $retryWaitInterval = 0.005;
-        $maxRetryAttempts = 8;
-        $retryAttempt = 0;
-
-        while (true) {
-            $this->reconnectDatabaseConnection();
-            if ($this->connection->getTransactionNestingLevel() > 0) {
-                throw new \RuntimeException('A transaction is active already, can\'t commit events!', 1547829131);
-            }
-            $this->connection->beginTransaction();
-            $this->lock();
-            try {
-                $initialStreamVersions = [];
-                // validation
-                foreach ($commit->expectedStreamConstraints as $expectedStreamConstraint) {
-                    $maybeVersion = $this->getStreamVersion($expectedStreamConstraint->streamName);
-                    $initialStreamVersions[$expectedStreamConstraint->streamName->value] = $maybeVersion->nextVersionOrFirst();
-                    if (!$expectedStreamConstraint->isSatisfiedBy($maybeVersion)) {
-                        throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpectedConstraint($expectedStreamConstraint, $maybeVersion, $commit->expectedStreamConstraints);
-                    }
+        $this->reconnectDatabaseConnection();
+        if ($this->connection->getTransactionNestingLevel() > 0) {
+            throw new \RuntimeException('A transaction is active already, can\'t commit events!', 1547829131);
+        }
+        $this->connection->beginTransaction();
+        $this->lock();
+        try {
+            $initialStreamVersions = [];
+            // validation
+            foreach ($commit->expectedStreamConstraints as $expectedStreamConstraint) {
+                $maybeVersion = $this->getStreamVersion($expectedStreamConstraint->streamName);
+                $initialStreamVersions[$expectedStreamConstraint->streamName->value] = $maybeVersion->nextVersionOrFirst();
+                if (!$expectedStreamConstraint->isSatisfiedBy($maybeVersion)) {
+                    throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpectedConstraint($expectedStreamConstraint, $maybeVersion, $commit->expectedStreamConstraints);
                 }
+            }
 
-                $highestCommittedSequenceNumber = null;
-                $newStreamVersions = [];
-                foreach ($commit->eventsForStreams as $eventsForStream) {
-                    $version = ($newStreamVersions[$eventsForStream->streamName->value] ?? null)?->version->next() ?? $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
+            $highestCommittedSequenceNumber = null;
+            $newStreamVersions = [];
+            foreach ($commit->eventsForStreams as $eventsForStream) {
+                $version = ($newStreamVersions[$eventsForStream->streamName->value] ?? null)?->version->next() ?? $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
+                $lastCommittedVersion = $version;
+                foreach ($eventsForStream->events as $event) {
+                    $this->commitEvent($eventsForStream->streamName, $event, $version);
                     $lastCommittedVersion = $version;
-                    foreach ($eventsForStream->events as $event) {
-                        $this->commitEvent($eventsForStream->streamName, $event, $version);
-                        $lastCommittedVersion = $version;
-                        $version = $version->next();
-                    }
-                    $lastInsertId = $this->connection->lastInsertId();
-                    if (!is_numeric($lastInsertId)) {
-                        throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
-                    }
-                    $highestCommittedSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
-                    $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
+                    $version = $version->next();
                 }
-                $this->connection->commit();
-                $this->unlock();
-                // Always set, as at least one iteration
-                assert($highestCommittedSequenceNumber !== null);
-                return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
-            } catch (UniqueConstraintViolationException $exception) {
-                if ($retryAttempt >= $maxRetryAttempts) {
-                    $this->connection->rollBack();
-                    $this->unlock();
-                    throw new ConcurrencyException(sprintf('Failed after %d retry attempts', $retryAttempt), 1573817175, $exception);
+                $lastInsertId = $this->connection->lastInsertId();
+                if (!is_numeric($lastInsertId)) {
+                    throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
                 }
-                usleep((int)($retryWaitInterval * 1E6));
-                $retryAttempt++;
-                $retryWaitInterval *= 2;
-                $this->connection->rollBack();
-                $this->unlock();
-                continue;
-            } catch (DeadlockException | LockWaitTimeoutException $exception) {
-                $this->connection->rollBack();
-                $this->unlock();
-                throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
-            } catch (DbalException | ConcurrencyException | \JsonException $exception) {
-                $this->connection->rollBack();
-                $this->unlock();
-                throw $exception;
+                $highestCommittedSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
+                $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
             }
+            $this->connection->commit();
+            $this->unlock();
+            // Always set, as at least one iteration
+            assert($highestCommittedSequenceNumber !== null);
+            return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
+        } catch (DeadlockException | LockWaitTimeoutException | UniqueConstraintViolationException $exception) {
+            $this->connection->rollBack();
+            $this->unlock();
+            throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
+        } catch (DbalException | ConcurrencyException | \JsonException $exception) {
+            $this->connection->rollBack();
+            $this->unlock();
+            throw $exception;
         }
     }
 
@@ -342,8 +322,8 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         if ($platform instanceof PostgreSQLPlatform) {
             $this->connection->executeStatement(
                 sprintf(
-                    'SELECT pg_advisory_xact_lock(%s)',
-                    133742,
+                    'SELECT pg_advisory_xact_lock(%d)',
+                    4635007631580729830,
                 ),
             );
 
