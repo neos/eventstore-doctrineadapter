@@ -9,6 +9,8 @@ use Doctrine\DBAL\Exception\DeadlockException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
+use Doctrine\DBAL\Platforms\MariaDBPlatform;
+use Doctrine\DBAL\Platforms\MySQLPlatform;
 use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Platforms\SqlitePlatform;
 use Doctrine\DBAL\Result;
@@ -103,6 +105,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 throw new \RuntimeException('A transaction is active already, can\'t commit events!', 1547829131);
             }
             $this->connection->beginTransaction();
+            $this->lock();
             try {
                 $initialStreamVersions = [];
                 // validation
@@ -132,24 +135,29 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                     $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
                 }
                 $this->connection->commit();
+                $this->unlock();
                 // Always set, as at least one iteration
                 assert($highestCommittedSequenceNumber !== null);
                 return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
             } catch (UniqueConstraintViolationException $exception) {
                 if ($retryAttempt >= $maxRetryAttempts) {
                     $this->connection->rollBack();
+                    $this->unlock();
                     throw new ConcurrencyException(sprintf('Failed after %d retry attempts', $retryAttempt), 1573817175, $exception);
                 }
                 usleep((int)($retryWaitInterval * 1E6));
                 $retryAttempt++;
                 $retryWaitInterval *= 2;
                 $this->connection->rollBack();
+                $this->unlock();
                 continue;
             } catch (DeadlockException | LockWaitTimeoutException $exception) {
                 $this->connection->rollBack();
+                $this->unlock();
                 throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
             } catch (DbalException | ConcurrencyException | \JsonException $exception) {
                 $this->connection->rollBack();
+                $this->unlock();
                 throw $exception;
             }
         }
@@ -325,6 +333,81 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 'recordedat' => Types::DATETIME_IMMUTABLE,
             ]
         );
+    }
+
+    private function lock(): void
+    {
+        $platform = $this->connection->getDatabasePlatform();
+
+        if ($platform instanceof PostgreSQLPlatform) {
+            $this->connection->executeStatement(
+                sprintf(
+                    'SELECT pg_advisory_xact_lock(%s)',
+                    133742,
+                ),
+            );
+
+            return;
+        }
+
+        if ($platform instanceof MariaDBPlatform || $platform instanceof MySQLPlatform) {
+            $result = $this->connection->fetchOne(
+                sprintf(
+                    // TODO why does -1 not work?
+                    'SELECT GET_LOCK("%s", %d)',
+                    133742,
+                    10,
+                ),
+            );
+
+            // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_get-lock
+            match ($result) {
+                0 => throw new \RuntimeException(sprintf('Timeout of %d seconds exceeded while waiting for lock "%s".', 10, 'TODO'), 1787297427),
+                1 => null,
+                null => throw new \RuntimeException(sprintf('Database error while acquiring lock "%s".', 'TODO'), 1733135506)
+            };
+
+            return;
+        }
+
+        if ($platform instanceof SQLitePlatform) {
+            return; // sql locking is not needed because of file locking
+        }
+
+        throw new LockingNotImplemented($platform::class);
+    }
+
+    private function unlock(): void
+    {
+        $platform = $this->connection->getDatabasePlatform();
+
+        if ($platform instanceof PostgreSQLPlatform) {
+            return; // lock is released automatically after transaction
+        }
+
+        if ($platform instanceof MariaDBPlatform || $platform instanceof MySQLPlatform) {
+            $result = $this->connection->fetchOne(
+                sprintf(
+                    'SELECT RELEASE_LOCK("%s")',
+                    133742,
+                ),
+            );
+
+            // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_release-lock
+            match ($result) {
+                0 => throw new \RuntimeException(sprintf('The lock "%s" was not established by this thread (in which case the lock is not released', 'TODO'), 1733142649),
+                1 => null,
+                null => throw new \RuntimeException(sprintf('The lock "%s" does not exist if it was never obtained or if it has previously been released.', 'TODO'), 1733142651)
+            };
+
+            return;
+        }
+
+        if ($platform instanceof SQLitePlatform) {
+            return; // sql locking is not needed because of file locking
+        }
+
+        throw new LockingNotImplemented($platform::class);
     }
 
     private function reconnectDatabaseConnection(): void
