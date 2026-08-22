@@ -1,30 +1,39 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Neos\EventStore\DoctrineAdapter\Helper;
 
-final readonly class AdvisoryLockKey
+final class AdvisoryLockKey
 {
+    /**
+     * @var array<string,self>
+     */
+    private static array $instances = [];
+
     private function __construct(
-        private string $value
+        private readonly string $binaryHash
     ) {
     }
 
     public static function fromTableName(string $tableName): self
     {
-        $hash32Chars = md5($tableName);
-        return new self(
-            substr($hash32Chars, 0, 16)
+        return self::$instances[$tableName] ??= new self(
+            binaryHash: md5($tableName, binary: true)
         );
     }
 
-    public function as16CharString(): string
+    public function as16CharHexString(): string
     {
-        return $this->value;
+        /** @var array{1: string} $u */
+        $u = unpack('H16', $this->binaryHash);
+        return $u[1];
     }
 
     public function as64BitInt(): int
     {
-        return hexdec($this->value);
+        /** @var array{1: int} $u */
+        $u = unpack('J1', $this->binaryHash);
+        return $u[1];
     }
 }

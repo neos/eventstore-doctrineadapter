@@ -326,10 +326,8 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
 
         if ($platform instanceof PostgreSQLPlatform) {
             $this->connection->executeStatement(
-                sprintf(
-                    'SELECT pg_advisory_xact_lock(%d)',
-                    $lockKey->as64BitInt(),
-                ),
+                'SELECT pg_advisory_xact_lock(?)',
+                [$lockKey->as64BitInt()],
             );
 
             return;
@@ -337,12 +335,9 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
 
         if ($platform instanceof MariaDBPlatform || $platform instanceof MySQLPlatform) {
             $result = $this->connection->fetchOne(
-                sprintf(
-                    // TODO why does -1 not work?
-                    'SELECT GET_LOCK("%s", %d)',
-                    $lockKey->as16CharString(),
-                    10,
-                ),
+                // TODO why does -1 not work?
+                'SELECT GET_LOCK(?, ?)',
+                [$lockKey->as16CharHexString(), 10],
             );
 
             // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_get-lock
@@ -374,10 +369,8 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             $lockKey = AdvisoryLockKey::fromTableName($this->eventTableName);
 
             $result = $this->connection->fetchOne(
-                sprintf(
-                    'SELECT RELEASE_LOCK("%s")',
-                    $lockKey->as16CharString(),
-                ),
+                'SELECT RELEASE_LOCK(?)',
+                [$lockKey->as16CharHexString()],
             );
 
             // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_release-lock
