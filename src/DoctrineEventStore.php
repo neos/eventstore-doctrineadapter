@@ -7,7 +7,6 @@ namespace Neos\EventStore\DoctrineAdapter;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Driver\Exception as DriverException;
 use Doctrine\DBAL\Exception as DbalException;
-use Doctrine\DBAL\Exception\DeadlockException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
@@ -24,13 +23,13 @@ use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
 use Neos\EventStore\DoctrineAdapter\Exception\AcquiringLockFailed;
+use Neos\EventStore\DoctrineAdapter\Exception\CommitFailed;
 use Neos\EventStore\DoctrineAdapter\Exception\LockingPlatformFailed;
 use Neos\EventStore\DoctrineAdapter\Exception\ReleasingLockFailed;
 use Neos\EventStore\DoctrineAdapter\Helper\AdvisoryLockKey;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Exception\ConcurrencyException;
 use Neos\EventStore\Helper\BatchEventStream;
-use Neos\EventStore\Model\EventsForCommit;
 use Neos\EventStore\Model\Event;
 use Neos\EventStore\Model\Event\CausationId;
 use Neos\EventStore\Model\Event\CorrelationId;
@@ -40,6 +39,7 @@ use Neos\EventStore\Model\Event\SequenceNumber;
 use Neos\EventStore\Model\Event\StreamName;
 use Neos\EventStore\Model\Event\Version;
 use Neos\EventStore\Model\Events;
+use Neos\EventStore\Model\EventsForCommit;
 use Neos\EventStore\Model\EventStore\CommitAllResult;
 use Neos\EventStore\Model\EventStore\CommitResult;
 use Neos\EventStore\Model\EventStore\Status;
@@ -144,9 +144,13 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             // Always set, as at least one iteration
             assert($highestCommittedSequenceNumber !== null);
             return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
-        } catch (DeadlockException | LockWaitTimeoutException | UniqueConstraintViolationException $exception) {
+        } catch (LockWaitTimeoutException $lockWaitTimeoutException) {
+            // Thrown in concurrency in SQLite: General error: 5 database is locked
             $this->connection->rollBack();
-            throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
+            throw new ConcurrencyException($lockWaitTimeoutException->getMessage(), 1705330559, $lockWaitTimeoutException);
+        } catch (DbalException $exception) {
+            $this->connection->rollBack();
+            throw CommitFailed::becauseConnectionException($commit, $exception);
         } catch (\Exception $exception) {
             $this->connection->rollBack();
             throw $exception;

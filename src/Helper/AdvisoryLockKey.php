@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Neos\EventStore\DoctrineAdapter\Helper;
 
+/**
+ * @internal
+ */
 final class AdvisoryLockKey
 {
     /**
