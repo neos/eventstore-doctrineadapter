@@ -139,18 +139,17 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
             }
             $this->connection->commit();
-            $this->unlock();
             // Always set, as at least one iteration
             assert($highestCommittedSequenceNumber !== null);
             return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
         } catch (DeadlockException | LockWaitTimeoutException | UniqueConstraintViolationException $exception) {
             $this->connection->rollBack();
-            $this->unlock();
             throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
-        } catch (DbalException | ConcurrencyException $exception) {
+        } catch (\Exception $exception) {
             $this->connection->rollBack();
-            $this->unlock();
             throw $exception;
+        } finally {
+            $this->unlock();
         }
     }
 
