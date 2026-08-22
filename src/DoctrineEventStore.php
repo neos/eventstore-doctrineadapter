@@ -21,8 +21,9 @@ use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
-use Neos\ContentRepository\Dbal\AcquiringLockFailed;
-use Neos\ContentRepository\Dbal\ReleasingLockFailed;
+use Neos\EventStore\DoctrineAdapter\Exception\AcquiringLockFailed;
+use Neos\EventStore\DoctrineAdapter\Exception\LockingPlatformFailed;
+use Neos\EventStore\DoctrineAdapter\Exception\ReleasingLockFailed;
 use Neos\EventStore\DoctrineAdapter\Helper\AdvisoryLockKey;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Exception\ConcurrencyException;
@@ -53,6 +54,8 @@ use Psr\Clock\ClockInterface;
 
 final class DoctrineEventStore implements EventStoreInterface, WithResetInterface
 {
+    private const MYSQL_LOCK_TIMEOUT = 3;
+
     public function __construct(
         private readonly Connection $connection,
         private readonly string $eventTableName,
@@ -101,7 +104,12 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             throw new \RuntimeException('A transaction is active already, can\'t commit events!', 1547829131);
         }
         $this->connection->beginTransaction();
-        $this->lock();
+        try {
+            $this->lock();
+        } catch (AcquiringLockFailed $acquiringLockFailed) {
+            $this->connection->rollBack();
+            throw new ConcurrencyException($acquiringLockFailed->getMessage(), 1787399398, $acquiringLockFailed);
+        }
         try {
             $initialStreamVersions = [];
             // validation
@@ -325,26 +333,33 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         $lockKey = AdvisoryLockKey::fromTableName($this->eventTableName);
 
         if ($platform instanceof PostgreSQLPlatform) {
-            $this->connection->executeStatement(
+            try {
+                $this->connection->executeStatement(
                 'SELECT pg_advisory_xact_lock(?)',
                 [$lockKey->as64BitInt()],
             );
+            } catch (DbalException $exception) {
+                throw AcquiringLockFailed::becauseConnectionException($lockKey->as64BitInt(), $this->eventTableName, $exception);
+            }
 
             return;
         }
 
         if ($platform instanceof MariaDBPlatform || $platform instanceof MySQLPlatform) {
-            $result = $this->connection->fetchOne(
-                // TODO why does -1 not work?
-                'SELECT GET_LOCK(?, ?)',
-                [$lockKey->as16CharHexString(), 10],
-            );
+            try {
+                $result = $this->connection->fetchOne(
+                    'SELECT GET_LOCK(?, ?)',
+                    [$lockKey->as16CharHexString(), self::MYSQL_LOCK_TIMEOUT],
+                );
+            } catch (DbalException $exception) {
+                throw AcquiringLockFailed::becauseConnectionException($lockKey->as16CharHexString(), $this->eventTableName, $exception);
+            }
 
-            // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_get-lock
             match ($result) {
-                0 => throw new AcquiringLockFailed(sprintf('Timeout of %d seconds exceeded while waiting for lock "%s".', 10, 'TODO'), 1787297427),
+                // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_get-lock
                 1 => null,
-                null => throw new AcquiringLockFailed(sprintf('Database error while acquiring lock "%s".', 'TODO'), 1733135506)
+                0 => throw AcquiringLockFailed::becauseMySqlTimeoutExceeded($lockKey->as16CharHexString(), $this->eventTableName, self::MYSQL_LOCK_TIMEOUT),
+                default => throw AcquiringLockFailed::becauseUnexpectedMySqlError($lockKey->as16CharHexString(), $this->eventTableName, $result)
             };
 
             return;
@@ -367,17 +382,21 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
 
         if ($platform instanceof MariaDBPlatform || $platform instanceof MySQLPlatform) {
             $lockKey = AdvisoryLockKey::fromTableName($this->eventTableName);
+            try {
+                $result = $this->connection->fetchOne(
+                    'SELECT RELEASE_LOCK(?)',
+                    [$lockKey->as16CharHexString()],
+                );
+            } catch (DbalException $exception) {
+                throw ReleasingLockFailed::becauseConnectionException($lockKey->as16CharHexString(), $this->eventTableName, $exception);
+            }
 
-            $result = $this->connection->fetchOne(
-                'SELECT RELEASE_LOCK(?)',
-                [$lockKey->as16CharHexString()],
-            );
-
-            // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_release-lock
             match ($result) {
-                0 => throw new ReleasingLockFailed(sprintf('The lock "%s" was not established by this thread (in which case the lock is not released', 'TODO'), 1733142649),
+                // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_release-lock
                 1 => null,
-                null => throw new ReleasingLockFailed(sprintf('The lock "%s" does not exist if it was never obtained or if it has previously been released.', 'TODO'), 1733142651)
+                0 => throw ReleasingLockFailed::becauseMySqlLockWasNotHereAcquired($lockKey->as16CharHexString(), $this->eventTableName),
+                null => throw ReleasingLockFailed::becauseMySqlLockDoesNotExist($lockKey->as16CharHexString(), $this->eventTableName),
+                default => throw ReleasingLockFailed::becauseUnexpectedMySqlError($lockKey->as16CharHexString(), $this->eventTableName, $result)
             };
 
             return;
