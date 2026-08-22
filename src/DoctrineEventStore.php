@@ -147,7 +147,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             $this->connection->rollBack();
             $this->unlock();
             throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
-        } catch (DbalException | ConcurrencyException | \JsonException $exception) {
+        } catch (DbalException | ConcurrencyException $exception) {
             $this->connection->rollBack();
             $this->unlock();
             throw $exception;
@@ -302,7 +302,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     }
 
     /**
-     * @throws DbalException | UniqueConstraintViolationException| \JsonException
+     * @throws DbalException | UniqueConstraintViolationException
      */
     private function commitEvent(StreamName $streamName, Event $event, Version $version): void
     {
