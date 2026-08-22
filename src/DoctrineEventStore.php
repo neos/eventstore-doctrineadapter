@@ -21,6 +21,9 @@ use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
+use Neos\ContentRepository\Dbal\AcquiringLockFailed;
+use Neos\ContentRepository\Dbal\ReleasingLockFailed;
+use Neos\EventStore\DoctrineAdapter\Helper\AdvisoryLockKey;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Exception\ConcurrencyException;
 use Neos\EventStore\Helper\BatchEventStream;
@@ -319,11 +322,13 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     {
         $platform = $this->connection->getDatabasePlatform();
 
+        $lockKey = AdvisoryLockKey::fromTableName($this->eventTableName);
+
         if ($platform instanceof PostgreSQLPlatform) {
             $this->connection->executeStatement(
                 sprintf(
                     'SELECT pg_advisory_xact_lock(%d)',
-                    4635007631580729830,
+                    $lockKey->as64BitInt(),
                 ),
             );
 
@@ -335,16 +340,16 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 sprintf(
                     // TODO why does -1 not work?
                     'SELECT GET_LOCK("%s", %d)',
-                    133742,
+                    $lockKey->as16CharString(),
                     10,
                 ),
             );
 
             // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_get-lock
             match ($result) {
-                0 => throw new \RuntimeException(sprintf('Timeout of %d seconds exceeded while waiting for lock "%s".', 10, 'TODO'), 1787297427),
+                0 => throw new AcquiringLockFailed(sprintf('Timeout of %d seconds exceeded while waiting for lock "%s".', 10, 'TODO'), 1787297427),
                 1 => null,
-                null => throw new \RuntimeException(sprintf('Database error while acquiring lock "%s".', 'TODO'), 1733135506)
+                null => throw new AcquiringLockFailed(sprintf('Database error while acquiring lock "%s".', 'TODO'), 1733135506)
             };
 
             return;
@@ -354,7 +359,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             return; // sql locking is not needed because of file locking
         }
 
-        throw new LockingNotImplemented($platform::class);
+        throw new LockingPlatformFailed($platform::class);
     }
 
     private function unlock(): void
@@ -366,18 +371,20 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         }
 
         if ($platform instanceof MariaDBPlatform || $platform instanceof MySQLPlatform) {
+            $lockKey = AdvisoryLockKey::fromTableName($this->eventTableName);
+
             $result = $this->connection->fetchOne(
                 sprintf(
                     'SELECT RELEASE_LOCK("%s")',
-                    133742,
+                    $lockKey->as16CharString(),
                 ),
             );
 
             // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_release-lock
             match ($result) {
-                0 => throw new \RuntimeException(sprintf('The lock "%s" was not established by this thread (in which case the lock is not released', 'TODO'), 1733142649),
+                0 => throw new ReleasingLockFailed(sprintf('The lock "%s" was not established by this thread (in which case the lock is not released', 'TODO'), 1733142649),
                 1 => null,
-                null => throw new \RuntimeException(sprintf('The lock "%s" does not exist if it was never obtained or if it has previously been released.', 'TODO'), 1733142651)
+                null => throw new ReleasingLockFailed(sprintf('The lock "%s" does not exist if it was never obtained or if it has previously been released.', 'TODO'), 1733142651)
             };
 
             return;
@@ -387,7 +394,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             return; // sql locking is not needed because of file locking
         }
 
-        throw new LockingNotImplemented($platform::class);
+        throw LockingPlatformFailed::becauseNotImplementedForPlatform($platform::class);
     }
 
     private function reconnectDatabaseConnection(): void
