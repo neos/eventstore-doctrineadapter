@@ -1,5 +1,7 @@
 <?php
+
 declare(strict_types=1);
+
 namespace Neos\EventStore\DoctrineAdapter;
 
 use Doctrine\DBAL\Connection;
@@ -334,9 +336,9 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
         if ($platform instanceof PostgreSQLPlatform) {
             try {
                 $this->connection->executeStatement(
-                'SELECT pg_advisory_xact_lock(?)',
-                [$lockKey->as64BitInt()],
-            );
+                    'SELECT pg_advisory_xact_lock(?)',
+                    [$lockKey->as64BitInt()],
+                );
             } catch (DbalException $exception) {
                 throw AcquiringLockFailed::becauseConnectionException($lockKey->as64BitInt(), $this->eventTableName, $exception);
             }
