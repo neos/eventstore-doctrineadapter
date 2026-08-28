@@ -7,22 +7,17 @@ namespace Neos\EventStore\DoctrineAdapter\Helper;
 /**
  * @internal
  */
-final class AdvisoryLockKey
+final readonly class AdvisoryLockKey
 {
-    /**
-     * @var array<string,self>
-     */
-    private static array $instances = [];
-
     private function __construct(
-        private readonly string $binaryHash
+        private string $binaryHash
     ) {
     }
 
-    public static function fromTableName(string $tableName): self
+    public static function fromString(string $string): self
     {
-        return self::$instances[$tableName] ??= new self(
-            binaryHash: md5($tableName, binary: true)
+        return new self(
+            binaryHash: md5($string, binary: true)
         );
     }
 
