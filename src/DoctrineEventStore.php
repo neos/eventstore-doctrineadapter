@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Neos\EventStore\DoctrineAdapter;
 
 use Doctrine\DBAL\Connection;
-use Doctrine\DBAL\Exception as DbalException;
+use Doctrine\DBAL\Exception as DBALException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
@@ -158,7 +158,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             // Thrown in concurrency in SQLite: General error: 5 database is locked
             $this->connection->rollBack();
             throw new ConcurrencyException($lockWaitTimeoutException->getMessage(), 1705330559, $lockWaitTimeoutException);
-        } catch (DbalException $exception) {
+        } catch (DBALException $exception) {
             $this->connection->rollBack();
             throw CommitFailed::becauseConnectionException($commit, $exception);
         } catch (\Exception $exception) {
@@ -180,7 +180,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     {
         try {
             $this->connection->connect();
-        } catch (DbalException $e) {
+        } catch (DBALException $e) {
             return Status::error(sprintf('Failed to connect to database: %s', $e->getMessage()));
         }
         $requiredSqlStatements = $this->determineRequiredSqlStatements();
@@ -298,7 +298,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     }
 
     /**
-     * @throws DbalException
+     * @throws DBALException
      */
     private function getStreamVersion(StreamName $streamName): MaybeVersion
     {
@@ -316,7 +316,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     }
 
     /**
-     * @throws DbalException | UniqueConstraintViolationException
+     * @throws DBALException | UniqueConstraintViolationException
      */
     private function commitEvent(StreamName $streamName, Event $event, Version $version): void
     {
@@ -350,7 +350,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                     'SELECT pg_advisory_xact_lock(?)',
                     [$this->lockKey->as64BitInt()],
                 );
-            } catch (DbalException $exception) {
+            } catch (DBALException $exception) {
                 throw AcquiringLockFailed::becauseConnectionException($this->lockKey->as64BitInt(), $this->eventTableName, $exception);
             }
 
@@ -363,7 +363,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                     'SELECT GET_LOCK(?, ?)',
                     [$this->lockKey->as16CharHexString(), self::MYSQL_LOCK_TIMEOUT],
                 );
-            } catch (DbalException $exception) {
+            } catch (DBALException $exception) {
                 throw AcquiringLockFailed::becauseConnectionException($this->lockKey->as16CharHexString(), $this->eventTableName, $exception);
             }
 
@@ -398,7 +398,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                     'SELECT RELEASE_LOCK(?)',
                     [$this->lockKey->as16CharHexString()],
                 );
-            } catch (DbalException $exception) {
+            } catch (DBALException $exception) {
                 throw ReleasingLockFailed::becauseConnectionException($this->lockKey->as16CharHexString(), $this->eventTableName, $exception);
             }
 
