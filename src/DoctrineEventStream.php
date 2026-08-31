@@ -2,7 +2,6 @@
 declare(strict_types=1);
 namespace Neos\EventStore\DoctrineAdapter;
 
-use Doctrine\DBAL\ForwardCompatibility\Result;
 use Doctrine\DBAL\Query\QueryBuilder;
 use Neos\EventStore\Model\Event;
 use Neos\EventStore\Model\Event\CausationId;

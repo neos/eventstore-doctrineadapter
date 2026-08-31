@@ -1,14 +1,16 @@
 <?php
+
 declare(strict_types=1);
+
 namespace Neos\EventStore\DoctrineAdapter;
 
 use Doctrine\DBAL\Connection;
-use Doctrine\DBAL\Driver\Exception as DriverException;
-use Doctrine\DBAL\Exception as DbalException;
-use Doctrine\DBAL\Exception\DeadlockException;
+use Doctrine\DBAL\Exception as DBALException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
+use Doctrine\DBAL\Platforms\MariaDBPlatform;
+use Doctrine\DBAL\Platforms\MySQLPlatform;
 use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Platforms\SqlitePlatform;
 use Doctrine\DBAL\Result;
@@ -19,10 +21,14 @@ use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
+use Neos\EventStore\DoctrineAdapter\Exception\AcquiringLockFailed;
+use Neos\EventStore\DoctrineAdapter\Exception\CommitFailed;
+use Neos\EventStore\DoctrineAdapter\Exception\LockingPlatformFailed;
+use Neos\EventStore\DoctrineAdapter\Exception\ReleasingLockFailed;
+use Neos\EventStore\DoctrineAdapter\Helper\AdvisoryLockKey;
 use Neos\EventStore\EventStoreInterface;
 use Neos\EventStore\Exception\ConcurrencyException;
 use Neos\EventStore\Helper\BatchEventStream;
-use Neos\EventStore\Model\EventsForCommit;
 use Neos\EventStore\Model\Event;
 use Neos\EventStore\Model\Event\CausationId;
 use Neos\EventStore\Model\Event\CorrelationId;
@@ -32,6 +38,7 @@ use Neos\EventStore\Model\Event\SequenceNumber;
 use Neos\EventStore\Model\Event\StreamName;
 use Neos\EventStore\Model\Event\Version;
 use Neos\EventStore\Model\Events;
+use Neos\EventStore\Model\EventsForCommit;
 use Neos\EventStore\Model\EventStore\CommitAllResult;
 use Neos\EventStore\Model\EventStore\CommitResult;
 use Neos\EventStore\Model\EventStore\Status;
@@ -48,11 +55,24 @@ use Psr\Clock\ClockInterface;
 
 final class DoctrineEventStore implements EventStoreInterface, WithResetInterface
 {
+    private const MYSQL_LOCK_TIMEOUT = 3;
+
+    private AdvisoryLockKey $lockKey;
+
+    /**
+     * @param string $eventTableName the table for schema setup and storing the events
+     * @param string $advisoryLockSeed to avoid that multiple event-store instances lock each other
+     *                                 on either multiple databases on the same database server
+     *                                 or on multiple tables in a single database, a unique seed should be specified.
+     *                                 That is the name of the database + the application name (or just the event table name).
+     */
     public function __construct(
         private readonly Connection $connection,
         private readonly string $eventTableName,
-        private readonly ClockInterface $clock
+        private readonly ClockInterface $clock,
+        string $advisoryLockSeed = ''
     ) {
+        $this->lockKey = AdvisoryLockKey::fromString($advisoryLockSeed);
     }
 
     public function load(VirtualStreamName|StreamName $streamName, ?EventStreamFilter $filter = null): EventStreamInterface
@@ -91,91 +111,61 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
 
     public function commitAll(EventsForCommit $commit): CommitAllResult
     {
-        # Exponential backoff: initial interval = 5ms and 8 retry attempts = max 1275ms (= 1,275 seconds)
-        # @see http://backoffcalculator.com/?attempts=8&rate=2&interval=5
-        $retryWaitInterval = 0.005;
-        $maxRetryAttempts = 8;
-        $retryAttempt = 0;
-
-        self::validateAllConstraintStreamsAreWritten($commit);
-
-        while (true) {
-            $this->reconnectDatabaseConnection();
-            if ($this->connection->getTransactionNestingLevel() > 0) {
-                throw new \RuntimeException('A transaction is active already, can\'t commit events!', 1547829131);
-            }
-            $this->connection->beginTransaction();
-            try {
-                $initialStreamVersions = [];
-                // validation
-                foreach ($commit->expectedStreamConstraints as $expectedStreamConstraint) {
-                    $maybeVersion = $this->getStreamVersion($expectedStreamConstraint->streamName);
-                    $initialStreamVersions[$expectedStreamConstraint->streamName->value] = $maybeVersion->nextVersionOrFirst();
-                    if (!$expectedStreamConstraint->isSatisfiedBy($maybeVersion)) {
-                        throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpectedConstraint($expectedStreamConstraint, $maybeVersion, $commit->expectedStreamConstraints);
-                    }
+        $this->reconnectDatabaseConnection();
+        if ($this->connection->getTransactionNestingLevel() > 0) {
+            throw CommitFailed::becauseTransactionIsAlreadyActive();
+        }
+        $this->connection->beginTransaction();
+        try {
+            $this->lock();
+        } catch (AcquiringLockFailed $acquiringLockFailed) {
+            $this->connection->rollBack();
+            throw new ConcurrencyException($acquiringLockFailed->getMessage(), 1787399398, $acquiringLockFailed);
+        }
+        try {
+            $initialStreamVersions = [];
+            // validation
+            foreach ($commit->expectedStreamConstraints as $expectedStreamConstraint) {
+                $maybeVersion = $this->getStreamVersion($expectedStreamConstraint->streamName);
+                $initialStreamVersions[$expectedStreamConstraint->streamName->value] = $maybeVersion->nextVersionOrFirst();
+                if (!$expectedStreamConstraint->isSatisfiedBy($maybeVersion)) {
+                    throw ConcurrencyException::becauseVersionOfStreamDoesNotMatchExpectedConstraint($expectedStreamConstraint, $maybeVersion, $commit->expectedStreamConstraints);
                 }
+            }
 
-                $highestCommittedSequenceNumber = null;
-                $newStreamVersions = [];
-                foreach ($commit->eventsForStreams as $eventsForStream) {
-                    $version = ($newStreamVersions[$eventsForStream->streamName->value] ?? null)?->version->next() ?? $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
+            $highestCommittedSequenceNumber = null;
+            $newStreamVersions = [];
+            foreach ($commit->eventsForStreams as $eventsForStream) {
+                $version = ($newStreamVersions[$eventsForStream->streamName->value] ?? null)?->version->next() ?? $initialStreamVersions[$eventsForStream->streamName->value] ?? $this->getStreamVersion($eventsForStream->streamName)->nextVersionOrFirst();
+                $lastCommittedVersion = $version;
+                foreach ($eventsForStream->events as $event) {
+                    $this->commitEvent($eventsForStream->streamName, $event, $version);
                     $lastCommittedVersion = $version;
-                    foreach ($eventsForStream->events as $event) {
-                        $this->commitEvent($eventsForStream->streamName, $event, $version);
-                        $lastCommittedVersion = $version;
-                        $version = $version->next();
-                    }
-                    $lastInsertId = $this->connection->lastInsertId();
-                    if (!is_numeric($lastInsertId)) {
-                        throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
-                    }
-                    $highestCommittedSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
-                    $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
+                    $version = $version->next();
                 }
-                $this->connection->commit();
-                // Always set, as at least one iteration
-                assert($highestCommittedSequenceNumber !== null);
-                return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
-            } catch (UniqueConstraintViolationException $exception) {
-                if ($retryAttempt >= $maxRetryAttempts) {
-                    $this->connection->rollBack();
-                    throw new ConcurrencyException(sprintf('Failed after %d retry attempts', $retryAttempt), 1573817175, $exception);
+                $lastInsertId = $this->connection->lastInsertId();
+                if (!is_numeric($lastInsertId)) {
+                    throw CommitFailed::becauseLastInsertIdMustBeNumeric($lastInsertId);
                 }
-                usleep((int)($retryWaitInterval * 1E6));
-                $retryAttempt++;
-                $retryWaitInterval *= 2;
-                $this->connection->rollBack();
-                continue;
-            } catch (DeadlockException | LockWaitTimeoutException $exception) {
-                $this->connection->rollBack();
-                throw new ConcurrencyException($exception->getMessage(), 1705330559, $exception);
-            } catch (DbalException | ConcurrencyException | \JsonException $exception) {
-                $this->connection->rollBack();
-                throw $exception;
+                $highestCommittedSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
+                $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
             }
-        }
-    }
-
-    /**
-     * FIXME, implement full support for locking foreign streams.
-     * This requires to use pessimistic locking as used here {@see https://github.com/bwaidelich/dcb-eventstore-doctrine/pull/52}
-     * Currently we only validate all constraints in PHP and rely on the database and unique index to prevent duplicates.
-     * This would no longer work when locking foreign streams as we dont write to them.
-     */
-    private static function validateAllConstraintStreamsAreWritten(EventsForCommit $commit): void
-    {
-        $streamsToLockMap = [];
-        foreach ($commit->expectedStreamConstraints as $eventsForStream) {
-            $streamsToLockMap[$eventsForStream->streamName->value] = true;
-        }
-        $streamsToWriteMap = [];
-        foreach ($commit->eventsForStreams as $eventsForStream) {
-            $streamsToWriteMap[$eventsForStream->streamName->value] = true;
-        }
-        $difference = array_diff_key($streamsToLockMap, $streamsToWriteMap);
-        if ($difference !== []) {
-            throw new \RuntimeException(sprintf('Locking on non-written streams: [%s] is not yet supported', join(', ', array_keys($difference))), 1781012037);
+            $this->connection->commit();
+            // Always set, as at least one iteration
+            assert($highestCommittedSequenceNumber !== null);
+            return CommitAllResult::create($highestCommittedSequenceNumber, VersionForStreams::create(...array_values($newStreamVersions)));
+        } catch (LockWaitTimeoutException $lockWaitTimeoutException) {
+            // Thrown in concurrency in SQLite: General error: 5 database is locked
+            $this->connection->rollBack();
+            throw new ConcurrencyException($lockWaitTimeoutException->getMessage(), 1705330559, $lockWaitTimeoutException);
+        } catch (DBALException $exception) {
+            $this->connection->rollBack();
+            throw CommitFailed::becauseConnectionException($commit, $exception);
+        } catch (\Exception $exception) {
+            $this->connection->rollBack();
+            throw $exception;
+        } finally {
+            $this->unlock();
         }
     }
 
@@ -190,7 +180,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     {
         try {
             $this->connection->connect();
-        } catch (DbalException $e) {
+        } catch (DBALException $e) {
             return Status::error(sprintf('Failed to connect to database: %s', $e->getMessage()));
         }
         $requiredSqlStatements = $this->determineRequiredSqlStatements();
@@ -308,8 +298,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     }
 
     /**
-     * @throws DriverException
-     * @throws DbalException
+     * @throws DBALException
      */
     private function getStreamVersion(StreamName $streamName): MaybeVersion
     {
@@ -320,14 +309,14 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             ->setParameter('streamName', $streamName->value)
             ->executeQuery();
         if (!$result instanceof Result) {
-            throw new \RuntimeException(sprintf('Failed to determine stream version of stream "%s"', $streamName->value), 1651153859);
+            throw CommitFailed::becauseFailedToDetermineStreamVersion($streamName);
         }
         $version = $result->fetchOne();
         return MaybeVersion::fromVersionOrNull(is_numeric($version) ? Version::fromInteger((int)$version) : null);
     }
 
     /**
-     * @throws DbalException | UniqueConstraintViolationException| \JsonException
+     * @throws DBALException | UniqueConstraintViolationException
      */
     private function commitEvent(StreamName $streamName, Event $event, Version $version): void
     {
@@ -349,6 +338,86 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 'recordedat' => Types::DATETIME_IMMUTABLE,
             ]
         );
+    }
+
+    private function lock(): void
+    {
+        $platform = $this->connection->getDatabasePlatform();
+
+        if ($platform instanceof PostgreSQLPlatform) {
+            try {
+                $this->connection->executeStatement(
+                    'SELECT pg_advisory_xact_lock(?)',
+                    [$this->lockKey->as64BitInt()],
+                );
+            } catch (DBALException $exception) {
+                throw AcquiringLockFailed::becauseConnectionException($this->lockKey->as64BitInt(), $this->eventTableName, $exception);
+            }
+
+            return;
+        }
+
+        if ($platform instanceof MariaDBPlatform || $platform instanceof MySQLPlatform) {
+            try {
+                $result = $this->connection->fetchOne(
+                    'SELECT GET_LOCK(?, ?)',
+                    [$this->lockKey->as16CharHexString(), self::MYSQL_LOCK_TIMEOUT],
+                );
+            } catch (DBALException $exception) {
+                throw AcquiringLockFailed::becauseConnectionException($this->lockKey->as16CharHexString(), $this->eventTableName, $exception);
+            }
+
+            match ($result) {
+                // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_get-lock
+                1 => null,
+                0 => throw AcquiringLockFailed::becauseMySqlTimeoutExceeded($this->lockKey->as16CharHexString(), $this->eventTableName, self::MYSQL_LOCK_TIMEOUT),
+                default => throw AcquiringLockFailed::becauseUnexpectedMySqlError($this->lockKey->as16CharHexString(), $this->eventTableName, $result)
+            };
+
+            return;
+        }
+
+        if ($platform instanceof SQLitePlatform) {
+            return; // sql locking is not needed because of file locking
+        }
+
+        throw new LockingPlatformFailed($platform::class);
+    }
+
+    private function unlock(): void
+    {
+        $platform = $this->connection->getDatabasePlatform();
+
+        if ($platform instanceof PostgreSQLPlatform) {
+            return; // lock is released automatically after transaction
+        }
+
+        if ($platform instanceof MariaDBPlatform || $platform instanceof MySQLPlatform) {
+            try {
+                $result = $this->connection->fetchOne(
+                    'SELECT RELEASE_LOCK(?)',
+                    [$this->lockKey->as16CharHexString()],
+                );
+            } catch (DBALException $exception) {
+                throw ReleasingLockFailed::becauseConnectionException($this->lockKey->as16CharHexString(), $this->eventTableName, $exception);
+            }
+
+            match ($result) {
+                // https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html#function_release-lock
+                1 => null,
+                0 => throw ReleasingLockFailed::becauseMySqlLockWasNotHereAcquired($this->lockKey->as16CharHexString(), $this->eventTableName),
+                null => throw ReleasingLockFailed::becauseMySqlLockDoesNotExist($this->lockKey->as16CharHexString(), $this->eventTableName),
+                default => throw ReleasingLockFailed::becauseUnexpectedMySqlError($this->lockKey->as16CharHexString(), $this->eventTableName, $result)
+            };
+
+            return;
+        }
+
+        if ($platform instanceof SQLitePlatform) {
+            return; // sql locking is not needed because of file locking
+        }
+
+        throw LockingPlatformFailed::becauseNotImplementedForPlatform($platform::class);
     }
 
     private function reconnectDatabaseConnection(): void
