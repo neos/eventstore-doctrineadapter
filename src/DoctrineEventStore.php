@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Neos\EventStore\DoctrineAdapter;
 
 use Doctrine\DBAL\Connection;
-use Doctrine\DBAL\Driver\Exception as DriverException;
 use Doctrine\DBAL\Exception as DbalException;
 use Doctrine\DBAL\Exception\LockWaitTimeoutException;
 use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
@@ -114,7 +113,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     {
         $this->reconnectDatabaseConnection();
         if ($this->connection->getTransactionNestingLevel() > 0) {
-            throw new \RuntimeException('A transaction is active already, can\'t commit events!', 1547829131);
+            throw CommitFailed::becauseTransactionIsAlreadyActive();
         }
         $this->connection->beginTransaction();
         try {
@@ -146,7 +145,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
                 }
                 $lastInsertId = $this->connection->lastInsertId();
                 if (!is_numeric($lastInsertId)) {
-                    throw new \RuntimeException(sprintf('Expected last insert id to be numeric, but it is: %s', get_debug_type($lastInsertId)), 1651749706);
+                    throw CommitFailed::becauseLastInsertIdMustBeNumeric($lastInsertId);
                 }
                 $highestCommittedSequenceNumber = SequenceNumber::fromInteger((int)$lastInsertId);
                 $newStreamVersions[$eventsForStream->streamName->value] = VersionForStream::create($eventsForStream->streamName, $lastCommittedVersion);
@@ -299,7 +298,6 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
     }
 
     /**
-     * @throws DriverException
      * @throws DbalException
      */
     private function getStreamVersion(StreamName $streamName): MaybeVersion
@@ -311,7 +309,7 @@ final class DoctrineEventStore implements EventStoreInterface, WithResetInterfac
             ->setParameter('streamName', $streamName->value)
             ->executeQuery();
         if (!$result instanceof Result) {
-            throw new \RuntimeException(sprintf('Failed to determine stream version of stream "%s"', $streamName->value), 1651153859);
+            throw CommitFailed::becauseFailedToDetermineStreamVersion($streamName);
         }
         $version = $result->fetchOne();
         return MaybeVersion::fromVersionOrNull(is_numeric($version) ? Version::fromInteger((int)$version) : null);
